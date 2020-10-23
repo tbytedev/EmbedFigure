@@ -26,15 +26,17 @@ using SCG   = System.Collections.Generic;
 using SD    = System.Drawing;
 using SDI   = System.Drawing.Imaging;
 using SIO   = System.IO;
+using ST    = System.Timers;
+using STT   = System.Threading.Tasks;
 using SW    = System.Windows;
 using SWC   = System.Windows.Controls;
 using SWM   = System.Windows.Media;
 using SWMI  = System.Windows.Media.Imaging;
 
 #if TRACE
-using System.Diagnostics;
-using System.Threading;
-using System.Runtime.CompilerServices;
+using TRC_SD   = System.Diagnostics;
+using TRC_ST   = System.Threading;
+using TRC_SRCS = System.Runtime.CompilerServices;
 #endif
 
 namespace EmbedFigure
@@ -49,158 +51,170 @@ namespace EmbedFigure
 	/// <summary>
 	/// Contains the rendered figure, that is ready to add to the <see cref="Microsoft.VisualStudio.Text.Editor.IAdornmentLayer">IAdornmentLayer</see>
 	/// </summary>
-	internal class Figure
+	internal class Figure : System.IDisposable
 	{
-		public readonly double m_ZoomLevel;
-		public readonly ColorTheme m_ColorTheme;
-		public readonly bool m_Inverted;
+		internal readonly SWMI.BitmapImage m_BitmapImage;
+		internal readonly double m_Height;
+		internal readonly double m_ZoomLevel;
+		internal readonly ColorTheme m_ColorTheme;
+		internal readonly bool m_Inverted;
 
-		private readonly string m_FigurePath;
-
-		public double m_Height;
-		public SWMI.BitmapImage m_BitmapImage;
-
+		private readonly SIO.MemoryStream m_MemoryStream;
 		private int m_ReferenceCount = 1;
 
-		public Figure(string figure_path, double zoom_level, ColorTheme color_tone, bool inverted)
+		internal Figure(SIO.MemoryStream memory_stream, double height, double zoom_level, ColorTheme color_tone, bool inverted)
 		{
-			m_FigurePath = figure_path;
+			// Load bitmap to System.Windows.Media.Imaging.BitmapImage from System.IO.MemoryStream
+			m_BitmapImage = new SWMI.BitmapImage();
+			m_BitmapImage.BeginInit();
+			m_BitmapImage.StreamSource = memory_stream;
+			m_BitmapImage.EndInit();
+
+			m_MemoryStream = memory_stream;
+			m_Height = height;
 			m_ZoomLevel = zoom_level;
 			m_ColorTheme = color_tone;
 			m_Inverted = inverted;
 		}
 
-		public void GenerateImage()
-		{
-			try
-			{
-				Svg.SvgDocument svg_doc = Svg.SvgDocument.Open(m_FigurePath);
-				SD.Bitmap bitmap = svg_doc.Draw();
-				m_Height = bitmap.Height;
-				if (1.0 != m_ZoomLevel)
-				{
-					bitmap = svg_doc.Draw(System.Convert.ToInt32(bitmap.Width * m_ZoomLevel), System.Convert.ToInt32(bitmap.Height * m_ZoomLevel));
-				}
-
-				if (m_Inverted)
-				{
-					for (int x = 0; x < bitmap.Width; ++x)
-					{
-						for (int y = 0; y < bitmap.Height; ++y)
-						{
-							SD.Color original_color = bitmap.GetPixel(x, y);
-							SD.Color new_color = SD.Color.FromArgb(original_color.A, 255 - original_color.R, 255 - original_color.G, 255 - original_color.B);
-							bitmap.SetPixel(x, y, new_color);
-						}
-					}
-				}
-
-				// Convert System.Drawing.Bitmap to System.Windows.Controls.Image, that can be added to m_AdornmentLayer
-				// Save System.Drawing.Bitmap to a Create System.IO.MemoryStream
-				var memory_stream = new SIO.MemoryStream();
-				bitmap.Save(memory_stream, SDI.ImageFormat.Tiff);
-				memory_stream.Seek(0, SIO.SeekOrigin.Begin);
-
-				// UI related objects (System.Windows.Media.Imaging.BitmapImage) can be created and used only on Main thread
-				Microsoft.VisualStudio.Shell.ThreadHelper.JoinableTaskFactory.Run(async delegate
-				{
-					await Microsoft.VisualStudio.Shell.ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-
-#if TRACE
-					EmbedFigureManager.TraceMsg("Switch to Main GenerateImage");
-#endif
-
-					// Load back bitmap as System.Windows.Media.Imaging.BitmapImage from System.IO.MemoryStream
-					m_BitmapImage = new SWMI.BitmapImage();
-					m_BitmapImage.BeginInit();
-					m_BitmapImage.StreamSource = memory_stream;
-					m_BitmapImage.EndInit();
-
-					EmbedFigureManager.s_FigureCache[new FigureCacheKey(m_FigurePath, m_Inverted)] = this;
-				});
-			}
-			catch
-			{
-				m_BitmapImage = null;
-				m_Height = 0.0;
-			}
-		}
-
-		public void IncreaseReferenceCount()
+		internal void IncreaseReferenceCount()
 		{
 			++m_ReferenceCount;
 		}
 
-		public void DecreaseReferenceCount()
+		internal bool DecreaseReferenceCount()
 		{
 			--m_ReferenceCount;
+			if (0 == m_ReferenceCount)
+			{
+				Dispose();
+				return true;
+			}
+			return false;
 		}
 
-		public int GetReferenceCount()
+		public void Dispose()
 		{
-			return m_ReferenceCount;
+			m_MemoryStream.Dispose();
 		}
 	}
 
-	internal readonly struct FigureCacheKey
+	internal class FigureCacheID
 	{
-		public FigureCacheKey(string figure_path, bool inverted)
+		internal readonly string m_DictionaryPath;
+		internal readonly string m_Filename;
+		internal double m_ZoomLevel;
+		internal bool m_Inverted;
+
+		internal FigureCacheID(string dictionary_path, string filename, double zoom_level, bool inverted)
 		{
-			m_FigurePath = figure_path;
+			m_DictionaryPath = dictionary_path;
+			m_Filename = filename;
+			m_ZoomLevel = zoom_level;
 			m_Inverted = inverted;
 		}
-		public readonly string m_FigurePath;
-		public readonly bool m_Inverted;
+		internal string GetFilePath()
+		{
+			return m_DictionaryPath + SIO.Path.DirectorySeparatorChar + m_Filename;
+		}
+
+		/// <summary>
+		/// Determines whether two <see cref="FigureCacheID"/> instances are equal.
+		/// </summary>
+		/// <remarks>
+		/// <para><see cref="FigureCacheID"/> is used as key for <see cref="System.Collections.Generic.Dictionary{TKey, TValue}">Dictionary</see>,
+		/// and this override is required for comparing the key by content and not by reference.</para>
+		/// <para>Comparing by reference is still possible via operator ==</para>
+		/// </remarks>
+		public override bool Equals(object obj)
+		{
+			return obj is FigureCacheID id && m_DictionaryPath == id.m_DictionaryPath && m_Filename == id.m_Filename && m_Inverted == id.m_Inverted;
+		}
+
+		/// <summary>
+		/// Hash for <see cref="FigureCacheID"/>
+		/// </summary>
+		/// <remarks>
+		/// <para><see cref="FigureCacheID"/> is used as key for <see cref="System.Collections.Generic.Dictionary{TKey, TValue}">Dictionary</see>,
+		/// and this override is required for comparing the key by content and not by reference.</para>
+		/// <para>Generated by Visual Studio.</para>
+		/// </remarks>
+		public override int GetHashCode()
+		{
+			int hashCode = 2138992742;
+			hashCode = hashCode * -1521134295 + SCG.EqualityComparer<string>.Default.GetHashCode(m_DictionaryPath);
+			hashCode = hashCode * -1521134295 + SCG.EqualityComparer<string>.Default.GetHashCode(m_Filename);
+			hashCode = hashCode * -1521134295 + m_Inverted.GetHashCode();
+			return hashCode;
+		}
 	}
 
 	internal readonly struct FigureParams
 	{
-		public FigureParams(string figure_path, ColorTheme color_tone, bool inverted)
+		internal readonly FigureCacheID m_FigureCacheID;
+		internal readonly ColorTheme m_ColorTheme;
+
+		internal FigureParams(FigureCacheID figure_cache_id, ColorTheme color_tone)
 		{
-			m_FigurePath = figure_path;
+			m_FigureCacheID = figure_cache_id;
 			m_ColorTheme = color_tone;
-			m_Inverted = inverted;
 		}
-		public readonly string m_FigurePath;
-		public readonly ColorTheme m_ColorTheme;
-		public readonly bool m_Inverted;
+	}
+
+	internal class FigureLoadParams
+	{
+		internal readonly FigureCacheID m_FigureCacheID;
+		internal readonly SCG.HashSet<LineID> m_LineIDs;
+		internal readonly ColorTheme m_ColorTheme;
+
+		public FigureLoadParams(FigureCacheID figure_cache_id, SCG.HashSet<LineID> line_ids, ColorTheme color_tone)
+		{
+			m_FigureCacheID = figure_cache_id;
+			m_LineIDs = line_ids;
+			m_ColorTheme = color_tone;
+		}
 	}
 
 	internal class LineEntry
 	{
-		public LineEntry(string figure_path, bool inverted)
+		internal FigureCacheID m_FigureCacheID;
+		internal Figure m_Figure;
+		internal ColorTheme m_ColorTheme;
+		internal bool m_Added;
+		internal bool m_Dirty;
+
+		public LineEntry(FigureCacheID figure_cache_id, ColorTheme color_theme)
 		{
-			m_FigurePath = figure_path;
-			m_Inverted = inverted;
+			m_FigureCacheID = figure_cache_id;
+			m_ColorTheme = color_theme;
 			m_Figure = null;
 			m_Added = false;
+			m_Dirty = true;
 		}
-		public string m_FigurePath;
-		public Figure m_Figure;
-		public bool m_Added;
-		public bool m_Inverted;
+
+		internal void RemoveFigure()
+		{
+			if (null != m_Figure)
+			{
+				if (m_Figure.DecreaseReferenceCount())
+				{
+					EmbedFigureManager.s_FigureCache.Remove(m_FigureCacheID);
+				}
+				m_Figure = null;
+			}
+		}
 	}
 
-	internal readonly struct LineId
+	internal readonly struct LineID
 	{
-		public LineId(EmbedFigureManager manager, int line_number)
+		internal readonly EmbedFigureManager m_Manager;
+		internal readonly int m_LineNumber;
+
+		internal LineID(EmbedFigureManager manager, int line_number)
 		{
 			m_Manager = manager;
 			m_LineNumber = line_number;
 		}
-		public readonly EmbedFigureManager m_Manager;
-		public readonly int m_LineNumber;
-	}
-
-	internal readonly struct LineUpdateInfo
-	{
-		public LineUpdateInfo(LineId line_id, Figure figure)
-		{
-			m_LineId = line_id;
-			m_Figure = figure;
-		}
-		public readonly LineId m_LineId;
-		public readonly Figure m_Figure;
 	}
 
 	enum ParameterType
@@ -213,13 +227,14 @@ namespace EmbedFigure
 
 	internal readonly struct ParameterToken
 	{
-		public ParameterToken(string raw_text, ParameterType type)
+		internal readonly string m_RawText;
+		internal readonly ParameterType m_Type;
+
+		internal ParameterToken(string raw_text, ParameterType type)
 		{
 			m_RawText = raw_text;
 			m_Type = type;
 		}
-		public readonly string m_RawText;
-		public readonly ParameterType m_Type;
 	}
 
 	/// <summary>
@@ -231,7 +246,7 @@ namespace EmbedFigure
 		/// Stores rendered figures for each path in <see cref="System.Windows.Media.Imaging.BitmapImage">BitmapImages</see>
 		/// It's accessed only from Main thread
 		/// </summary>
-		internal static readonly SCG.Dictionary<FigureCacheKey, Figure> s_FigureCache = new SCG.Dictionary<FigureCacheKey, Figure>();
+		internal static readonly SCG.Dictionary<FigureCacheID, Figure> s_FigureCache = new SCG.Dictionary<FigureCacheID, Figure>();
 
 		/// <summary>
 		/// Instruction to embed a figure to the source. This is prefixed by a #
@@ -250,34 +265,39 @@ namespace EmbedFigure
 		private static readonly char[] s_InvalidChars;
 
 		/// <summary>
-		/// This timer is fired after the user hasn't changed the text for 1500 ms.
+		/// This timer is fired after the user hasn't changed the text for 1500 ms and there are files to load.
 		/// </summary>
 		/// <remarks>
 		/// Do not load and render figures at once while user is still typing, rather wait some time to let things settle down a bit.
 		/// Load is commenced when this timer is elapsed.
 		/// </remarks>
-		private static readonly System.Timers.Timer s_LoadingTimer = new System.Timers.Timer(500);
+		private static readonly System.Timers.Timer s_LoadingTimer = new System.Timers.Timer(5000);
 
 		/// <summary>
 		/// Stores the figures to load and the lines to refresh
 		/// It's accessed from both Main and Timer thread
 		/// </summary>
-		private static readonly SCG.Dictionary<LineId, FigureParams> s_LineLoadQueue = new SCG.Dictionary<LineId, FigureParams>();
+		private static readonly SCG.Dictionary<LineID, FigureParams> s_LineLoadQueue = new SCG.Dictionary<LineID, FigureParams>();
+
+		private static readonly SCG.List<EmbedFigureManager> s_Managers = new SCG.List<EmbedFigureManager>();
+
+		private static readonly FileWatcher s_FileWatcher = new FileWatcher();
 
 #if TRACE
-		private static readonly ThreadLocal<string> s_ThreadName = new ThreadLocal<string>(() => { return "Thread " + (10 > Thread.CurrentThread.ManagedThreadId ? " " + Thread.CurrentThread.ManagedThreadId : Thread.CurrentThread.ManagedThreadId.ToString()); });
-		private static readonly ThreadLocal<int> s_Indent = new ThreadLocal<int>(() => { return 0; });
+		private static readonly TRC_ST.ThreadLocal<string> s_ThreadName = new TRC_ST.ThreadLocal<string>(() => { return "Thread " + (10 > TRC_ST.Thread.CurrentThread.ManagedThreadId ? " " + TRC_ST.Thread.CurrentThread.ManagedThreadId : TRC_ST.Thread.CurrentThread.ManagedThreadId.ToString()); });
+		private static readonly TRC_ST.ThreadLocal<int>    s_Indent     = new TRC_ST.ThreadLocal<int>   (() => { return 0; });
 #endif
 
 		/// <summary>
 		/// Indicates if the timer is active.
 		/// </summary>
 		/// <remarks>
-		/// <see cref="OnTimerElapsed">OnTimerElapsed</see> may be called even after <see cref="s_LoadingTimer">s_LoadingTimer</see> has been stopped.
-		/// It's set to true when the timer is started, and set to false when the timer is stopped. <see cref="OnTimerElapsed">OnTimerElapsed</see>
-		/// checks this flag and if it's false, returns immediately.
+		/// <see cref="OnTimerElapsed">OnTimerElapsed</see> may be raised even after <see cref="s_LoadingTimer">s_LoadingTimer</see> has been stopped.
+		/// The actual value of this ID is copied into the event handled each time the timer has been started, and this ID is incremented each time the timer has been stopped.
+		/// So when the event is raised the event handler can compare its copied ID and the actual ID.
+		/// If the two values are the same no Stop() method has been between the timer start and timer raise.
 		/// </remarks>
-		private static bool s_LoadingTimerActive = false;
+		private static int s_LoadingTimerStartID = 0;
 
 		/// <summary>
 		/// Set up a sorted list of invalid characters, because it's faster to search in sorted arrays.
@@ -293,6 +313,9 @@ namespace EmbedFigure
 
 			s_InvalidChars = invalid_chars.ToArray();
 			System.Array.Sort(s_InvalidChars);
+
+			s_FileWatcher.FileChanged += OnFileChanged;
+			s_FileWatcher.FileDeleted += OnFileDeleted;
 
 			s_LoadingTimer.AutoReset = false;
 		}
@@ -314,23 +337,45 @@ namespace EmbedFigure
 			return ColorTheme.Unspecified;
 		}
 
-		private static void CleanUpCache()
+		private static void OnFileChanged(string directory_path, string filename)
 		{
-			var keys_to_remove = new SCG.List<FigureCacheKey>();
-			foreach (SCG.KeyValuePair<FigureCacheKey, Figure> pair in s_FigureCache)
-			{
-				Figure figure = pair.Value;
-				if (0 == figure.GetReferenceCount())
-				{
-					keys_to_remove.Add(pair.Key);
-				}
-			}
 
-			foreach (FigureCacheKey key in keys_to_remove)
+		}
+
+		private static void OnFileDeleted(string directory_path, string filename)
+		{
+
+		}
+
+		static ST.ElapsedEventHandler s_LoadingTimerEventHandler;
+
+		private static void StartLoadingTimer()
+		{
+			// Capture current value of s_LoadingTimerStartID to be used in event handler lambda expression.
+			var loading_timer_start_id = s_LoadingTimerStartID;
+
+			// Create new delegate from lambda with captured timer start ID, and store it to be able to unsubscribe later.
+			s_LoadingTimerEventHandler = (sender, e) => { OnTimerElapsed(loading_timer_start_id); };
+
+			// It's necessary to subscribe a new delegate each time the timer has been started, because every delegate contains a different captured timer start id.
+			s_LoadingTimer.Elapsed += s_LoadingTimerEventHandler;
+			s_LoadingTimer.Start();
+		}
+
+		private static void StopLoadingTimer()
+		{
+			// It's possible that Elapsed event is raised after the Stop method is called. Increasing timer start ID invalidates upcoming elapsed event.
+			++s_LoadingTimerStartID;
+			s_LoadingTimer.Stop();
+
+			// Unsubscribe event handler
+			if (null != s_LoadingTimerEventHandler)
 			{
-				s_FigureCache.Remove(key);
+				s_LoadingTimer.Elapsed -= s_LoadingTimerEventHandler;
+				s_LoadingTimerEventHandler = null;
 			}
 		}
+
 
 		/// <summary>
 		/// The layer of the adornment.
@@ -355,7 +400,7 @@ namespace EmbedFigure
 		/// <summary>
 		/// Current color theme
 		/// </summary>
-		private ColorTheme m_BackgroundTone = ColorTheme.Unspecified;
+		private ColorTheme m_ColorTheme = ColorTheme.Unspecified;
 
 		/// <summary>
 		/// Initializes a new instance of the <see cref="EmbedFigureManager"/> class.
@@ -374,18 +419,19 @@ namespace EmbedFigure
 				return;
 			}
 
+			s_Managers.Add(this);
+
 			m_AdornmentLayer = text_view.GetAdornmentLayer("EmbedFigureAdornmentLayer");
 
 			m_TextView = text_view;
 
 			// Detect background color brightness
-			m_BackgroundTone = GetColorThemeFromBrush(m_TextView.Background);
+			m_ColorTheme = GetColorThemeFromBrush(m_TextView.Background);
 
 			m_TextView.BackgroundBrushChanged += OnBackgroundChanged;
+			m_TextView.Closed                 += OnClosed;
 			m_TextView.LayoutChanged          += OnLayoutChanged;
 			m_TextView.ZoomLevelChanged       += OnZoomLevelChanged;
-
-			s_LoadingTimer.Elapsed            += OnTimerElapsed;
 		}
 
 		private void AddAdornment(MVSTF.ITextViewLine line, int line_number, LineEntry line_entry)
@@ -593,9 +639,10 @@ namespace EmbedFigure
 		/// Parse line. Search for #EmbedFigure instruction, and register figure changes.
 		/// </summary>
 		/// <param name="line">Line to add the adornments</param>
-		private void ParseLine(string line_string, out string out_figure_path, out ColorTheme out_color_tone)
+		private void ParseLine(string line_string, out string out_dictionary_path, out string out_filename, out ColorTheme out_color_tone)
 		{
-			out_figure_path = null;
+			out_dictionary_path = null;
+			out_filename = null;
 			out_color_tone = ColorTheme.Unspecified;
 			int line_length = line_string.Length;
 
@@ -654,7 +701,7 @@ namespace EmbedFigure
 
 				ParameterType parameter_name = ParameterType.UnknownParameter;
 
-				string figure_filename = null;
+				string local_path = null;
 
 				foreach (ParameterToken token in tokens)
 				{
@@ -663,19 +710,19 @@ namespace EmbedFigure
 						switch (parameter_name)
 						{
 							case ParameterType.SVGFile:
-								if (null == figure_filename)
+								if (null == local_path)
 								{
 									if (0 == token.m_RawText.Length)
 									{
 										break;
 									}
 
-									// Filename mustn't contain invalid characters
+									// Local path mustn't contain invalid characters
 									foreach (char c in token.m_RawText)
 									{
 										if (0 <= System.Array.BinarySearch(s_InvalidChars, c))
 										{
-											goto _invalid_filename;
+											goto _invalid_local_path;
 										}
 									}
 
@@ -686,9 +733,9 @@ namespace EmbedFigure
 										break;
 									}
 
-									figure_filename = token.m_RawText;
+									local_path = token.m_RawText;
 								}
-							_invalid_filename:
+							_invalid_local_path:
 								break;
 							case ParameterType.ColorTheme:
 								if (ColorTheme.Unspecified == out_color_tone)
@@ -712,18 +759,20 @@ namespace EmbedFigure
 					}
 				}
 
-				if (null == figure_filename)
+				if (null == local_path)
 				{
 					return;
 				}
 				// TODO: Check if file system is case sensitive.
 				// For now we're assuming that it's a windows file system, so it's case insensitive.
 				// Convert filename to lowercase to ignore character case.
-				figure_filename = figure_filename.ToLower();
-				figure_filename = figure_filename.Replace(SIO.Path.AltDirectorySeparatorChar, SIO.Path.DirectorySeparatorChar);
+				local_path = local_path.ToLowerInvariant();
+				local_path = local_path.Replace(SIO.Path.AltDirectorySeparatorChar, SIO.Path.DirectorySeparatorChar);
 
 				// TODO: Support for full path and other rooted path types
-				out_figure_path = string.Concat(SIO.Path.GetDirectoryName(m_TextDocument.FilePath), SIO.Path.DirectorySeparatorChar, figure_filename);
+				string figure_path = SIO.Path.GetDirectoryName(m_TextDocument.FilePath) + SIO.Path.DirectorySeparatorChar + local_path;
+				out_dictionary_path = SIO.Path.GetDirectoryName(figure_path);
+				out_filename = SIO.Path.GetFileName(figure_path);
 				return;
 			}
 		}
@@ -736,54 +785,55 @@ namespace EmbedFigure
 		{
 
 			MVST.ITextSnapshot text_snapshot = m_TextView.TextSnapshot;
-			ParseLine(text_snapshot.GetText(line.Extent.Span), out string figure_path, out ColorTheme color_tone);
+			ParseLine(text_snapshot.GetText(line.Extent.Span), out string dictionary_path, out string filename, out ColorTheme color_theme);
 
 			//MVSTE.IWpfTextViewLineCollection text_view_lines = m_TextView.TextViewLines;
 			int line_number = text_snapshot.GetLineNumberFromPosition(line.Start);
-			var line_id = new LineId(this, line_number);
+			var line_id = new LineID(this, line_number);
 
 			lock ((s_LineLoadQueue as SC.ICollection).SyncRoot)
 			{
 				s_LineLoadQueue.Remove(line_id);
 			}
 
-			if (null == figure_path)
+			if (null == dictionary_path)
 			{
-				// There's no figure specified in this line currently
+				// Currently there's no figure specified in this line
 				if (m_LineFigures.TryGetValue(line_number, out LineEntry old_line_entry))
 				{
-					// But there was a figure in this line previously
-					if (null != old_line_entry.m_Figure)
-					{
-						old_line_entry.m_Figure.DecreaseReferenceCount();
-						old_line_entry.m_Figure = null;
-					}
+					// But there was a figure in this line previously. Remove previous figure.
+					s_FileWatcher.RemoveFile(old_line_entry.m_FigureCacheID.m_DictionaryPath, old_line_entry.m_FigureCacheID.m_Filename);
+					old_line_entry.RemoveFigure();
 					m_LineFigures.Remove(line_number);
 				}
 			}
 			else
 			{
-				bool inverted = ColorTheme.Unspecified != color_tone && color_tone != m_BackgroundTone;
-				FigureCacheKey figure_cache_key = new FigureCacheKey(figure_path, inverted);
+				// There's a figure in this line
+				double zoom_level = m_TextView.ZoomLevel;
+				bool inverted = ColorTheme.Unspecified != color_theme && color_theme != m_ColorTheme;
 
 				if (m_LineFigures.TryGetValue(line_number, out LineEntry line_entry))
 				{
-					if (line_entry.m_FigurePath != figure_path || line_entry.m_Inverted != inverted || null == line_entry.m_Figure)
+					// There's a figure in this line and there was a figure in this line previously
+					if (line_entry.m_FigureCacheID.m_DictionaryPath != dictionary_path ||
+						line_entry.m_FigureCacheID.m_Filename       != filename ||
+						line_entry.m_FigureCacheID.m_Inverted       != inverted ||
+						line_entry.m_FigureCacheID.m_ZoomLevel      != zoom_level)
 					{
-						if (null != line_entry.m_FigurePath)
+						// The current and the previous figures are different
+						line_entry.RemoveFigure();
+
+						if (line_entry.m_FigureCacheID.m_DictionaryPath != dictionary_path || line_entry.m_FigureCacheID.m_Filename != filename)
 						{
-							if (null != line_entry.m_Figure)
-							{
-								line_entry.m_Figure.DecreaseReferenceCount();
-								line_entry.m_Figure = null;
-							}
+							s_FileWatcher.RemoveFile(line_entry.m_FigureCacheID.m_DictionaryPath, line_entry.m_FigureCacheID.m_Filename);
+							s_FileWatcher.AddFile(dictionary_path, filename);
 						}
 
-						line_entry.m_FigurePath = figure_path;
-						line_entry.m_Inverted = inverted;
+						FigureCacheID figure_cache_id = new FigureCacheID(dictionary_path, filename, zoom_level, inverted);
+						line_entry.m_FigureCacheID = figure_cache_id;
 
-						// Figure path has been changed in this line
-						if (s_FigureCache.TryGetValue(figure_cache_key, out Figure figure) && figure.m_ZoomLevel == m_TextView.ZoomLevel)
+						if (s_FigureCache.TryGetValue(figure_cache_id, out Figure figure) && figure.m_ZoomLevel == m_TextView.ZoomLevel)
 						{
 							figure.IncreaseReferenceCount();
 							line_entry.m_Figure = figure;
@@ -793,20 +843,24 @@ namespace EmbedFigure
 						{
 							lock ((s_LineLoadQueue as SC.ICollection).SyncRoot)
 							{
-								s_LineLoadQueue[line_id] = new FigureParams(figure_path, color_tone, inverted);
+								s_LineLoadQueue.Add(line_id, new FigureParams(figure_cache_id, color_theme));
 							}
 						}
 					}
-					else if (!line_entry.m_Added)
+					else if (null != line_entry.m_Figure && !line_entry.m_Added)
 					{
 						AddAdornment(line, line_number, line_entry);
 					}
 				}
 				else
 				{
-					line_entry = new LineEntry(figure_path, inverted);
+					// There's a figure in this line and there was no figure in this line previously
+					s_FileWatcher.AddFile(dictionary_path, filename);
+
+					FigureCacheID figure_cache_id = new FigureCacheID(dictionary_path, filename, zoom_level, inverted);
+					line_entry = new LineEntry(figure_cache_id, color_theme);
 					m_LineFigures[line_number] = line_entry;
-					if (s_FigureCache.TryGetValue(figure_cache_key, out Figure figure) && figure.m_ZoomLevel == m_TextView.ZoomLevel)
+					if (s_FigureCache.TryGetValue(figure_cache_id, out Figure figure))
 					{
 						line_entry.m_Figure = figure;
 						AddAdornment(line, line_number, line_entry);
@@ -815,7 +869,7 @@ namespace EmbedFigure
 					{
 						lock ((s_LineLoadQueue as SC.ICollection).SyncRoot)
 						{
-							s_LineLoadQueue[line_id] = new FigureParams(figure_path, color_tone, inverted);
+							s_LineLoadQueue.Add(line_id, new FigureParams(figure_cache_id, color_theme));
 						}
 					}
 				}
@@ -839,17 +893,16 @@ namespace EmbedFigure
 #if TRACE
 			EnterFunction();
 #endif
-			s_LoadingTimerActive = false;
-			s_LoadingTimer.Stop();
-
-			ColorTheme background_tone = GetColorThemeFromBrush(e.NewBackgroundBrush);
-			if (background_tone != m_BackgroundTone)
-			{
-				m_BackgroundTone = background_tone;
-			}
-
 			lock ((s_LineLoadQueue as SC.ICollection).SyncRoot)
 			{
+				StopLoadingTimer();
+
+				ColorTheme background_tone = GetColorThemeFromBrush(e.NewBackgroundBrush);
+				if (background_tone != m_ColorTheme)
+				{
+					m_ColorTheme = background_tone;
+				}
+
 				foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineFigures)
 				{
 					LineEntry line_entry = pair.Value;
@@ -857,28 +910,36 @@ namespace EmbedFigure
 					m_AdornmentLayer.RemoveAdornmentsByTag(line_number);
 					if (null != line_entry.m_Figure)
 					{
-						ColorTheme color_tone = line_entry.m_Figure.m_ColorTheme;
-						bool inverted = ColorTheme.Unspecified != color_tone && color_tone != m_BackgroundTone;
-						s_LineLoadQueue[new LineId(this, line_number)] = new FigureParams(line_entry.m_FigurePath, color_tone, inverted);
-
-						line_entry.m_Figure.DecreaseReferenceCount();
-						line_entry.m_Figure = null;
+						ColorTheme color_theme = line_entry.m_Figure.m_ColorTheme;
+						line_entry.m_FigureCacheID.m_Inverted = ColorTheme.Unspecified != color_theme && color_theme != m_ColorTheme;
+						s_LineLoadQueue.Add(new LineID(this, line_number), new FigureParams(line_entry.m_FigureCacheID, color_theme));
+						line_entry.RemoveFigure();
 					}
 				}
+
+				StartLoadingTimer();
 			}
-			s_LoadingTimerActive = true;
-			s_LoadingTimer.Start();
 #if TRACE
 			LeaveFunction();
 #endif
 		}
 
+		private void OnClosed(object sender, System.EventArgs e)
+		{
+			m_TextView.Properties.RemoveProperty(typeof(EmbedFigureManager));
+			s_Managers.Remove(this);
+		}
+
+
 		/// <summary>
 		/// Handles whenever the text displayed in the view changes by adding the adornment to any reformatted lines
 		/// </summary>
 		/// <remarks><para>This event is raised whenever the rendered text displayed in the <see cref="Microsoft.VisualStudio.Text.Editor.ITextView">ITextView</see> changes.</para>
-		/// <para>It is raised whenever the view does a layout (which happens when <see cref="Microsoft.VisualStudio.Text.Editor.ITextView.DisplayTextLineContainingBufferPosition">DisplayTextLineContainingBufferPosition</see> is called or in response to text or classification changes).</para>
+		/// <para>It is raised whenever the view does a layout (which happens when
+		/// <see cref="Microsoft.VisualStudio.Text.Editor.ITextView.DisplayTextLineContainingBufferPosition">DisplayTextLineContainingBufferPosition</see> is called
+		/// or in response to text or classification changes).</para>
 		/// <para>It is also raised whenever the view scrolls horizontally or when its size changes.</para>
+		/// <para>This function is called by the framework on Main Thread</para>
 		/// </remarks>
 		/// <param name="sender">The event sender.</param>
 		/// <param name="e">The event arguments.</param>
@@ -891,8 +952,10 @@ namespace EmbedFigure
 #if TRACE
 			EnterFunction();
 #endif
-			s_LoadingTimerActive = false;
-			s_LoadingTimer.Stop();
+			lock ((s_LineLoadQueue as SC.ICollection).SyncRoot)
+			{
+				StopLoadingTimer();
+			}
 
 			foreach (MVSTF.ITextViewLine line in e.NewOrReformattedLines)
 			{
@@ -903,8 +966,7 @@ namespace EmbedFigure
 			{
 				if (0 != s_LineLoadQueue.Count)
 				{
-					s_LoadingTimerActive = true;
-					s_LoadingTimer.Start();
+					StartLoadingTimer();
 				}
 			}
 #if TRACE
@@ -912,9 +974,11 @@ namespace EmbedFigure
 #endif
 		}
 
-		private void OnTimerElapsed(object sender, System.Timers.ElapsedEventArgs e)
+		public static void LoadFigure(object context)
 		{
-			if (!s_LoadingTimerActive)
+			var figure_load_params = (FigureLoadParams)context;
+			string figure_path = figure_load_params.m_FigureCacheID.GetFilePath();
+			if (!SIO.File.Exists(figure_path))
 			{
 				return;
 			}
@@ -922,147 +986,201 @@ namespace EmbedFigure
 #if TRACE
 			EnterFunction();
 #endif
-			var lines_to_update = new SCG.List<LineUpdateInfo>();
+			SD.Bitmap bitmap = null;
+			SIO.MemoryStream memory_stream = null;
+			double height = 0.0;
+			try
+			{
+				Svg.SvgDocument svg_doc = Svg.SvgDocument.Open(figure_path);
+				bitmap = svg_doc.Draw();
+				height = bitmap.Height;
+				if (100.0 != figure_load_params.m_FigureCacheID.m_ZoomLevel)
+				{
+					double zoom = figure_load_params.m_FigureCacheID.m_ZoomLevel / 100.0;
+					bitmap = svg_doc.Draw(System.Convert.ToInt32(bitmap.Width * zoom), System.Convert.ToInt32(bitmap.Height * zoom));
+				}
 
-			// Create a list of lines for each figure. It's possible that more than one lines are waiting for the same figure to be loaded.
-			var figure_load_queue = new SCG.Dictionary<FigureParams, SCG.List<LineId>>();
+				// Invert figure if needed
+				if (figure_load_params.m_FigureCacheID.m_Inverted)
+				{
+					for (int x = 0; x < bitmap.Width; ++x)
+					{
+						for (int y = 0; y < bitmap.Height; ++y)
+						{
+							SD.Color original_color = bitmap.GetPixel(x, y);
+							SD.Color new_color = SD.Color.FromArgb(original_color.A, 255 - original_color.R, 255 - original_color.G, 255 - original_color.B);
+							bitmap.SetPixel(x, y, new_color);
+						}
+					}
+				}
+
+				// Convert System.Drawing.Bitmap to System.Windows.Controls.Image, that can be added to m_AdornmentLayer
+				// Save System.Drawing.Bitmap to a System.IO.MemoryStream
+				memory_stream = new SIO.MemoryStream();
+				bitmap.Save(memory_stream, SDI.ImageFormat.Tiff);
+				memory_stream.Seek(0, SIO.SeekOrigin.Begin);
+
+#if TRACE
+				TraceMsg("Switch to Main LoadFigure");
+#endif
+				// UI related objects (System.Windows.Media.Imaging.BitmapImage) can be created and used only on Main thread
+				Microsoft.VisualStudio.Shell.ThreadHelper.JoinableTaskFactory.Run(async delegate
+				{
+					await Microsoft.VisualStudio.Shell.ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+#if TRACE
+					TraceMsg("Switched to Main LoadFigure");
+#endif
+					var figure = new Figure(memory_stream, height, figure_load_params.m_FigureCacheID.m_ZoomLevel, figure_load_params.m_ColorTheme, figure_load_params.m_FigureCacheID.m_Inverted);
+
+					s_FigureCache.Add(figure_load_params.m_FigureCacheID, figure);
+
+					foreach (EmbedFigureManager manager in s_Managers)
+					{
+						foreach (SCG.KeyValuePair<int, LineEntry> pair in manager.m_LineFigures)
+						{
+							LineEntry line_entry = pair.Value;
+							int line_number = pair.Key;
+							if (line_entry.m_FigureCacheID == figure_load_params.m_FigureCacheID)
+							{
+								line_entry.m_Figure = figure;
+								MVSTE.IWpfTextView text_view = manager.m_TextView;
+
+								// Get the first line from text_view.TextViewLines, this is not the same as text_view.TextViewLines.FirstVisibleLine.
+								// It's possible that text_view.TextViewLines[0] is hidden and it's before text_view.TextViewLines.FirstVisibleLine
+								MVSTF.IWpfTextViewLine first_view_line = text_view.TextViewLines[0];
+								int first_view_line_number = text_view.TextSnapshot.GetLineNumberFromPosition(first_view_line.Start);
+								int view_line_number = line_number - first_view_line_number;
+
+								// Skip lines that has no corresponding line in text_view.TextViewLines
+								if (0 > view_line_number)
+								{
+									continue;
+								}
+								if (manager.m_TextView.TextViewLines.Count <= view_line_number)
+								{
+									continue;
+								}
+
+								// Refresh line
+								MVSTF.IWpfTextViewLine curr_view_line = manager.m_TextView.TextViewLines[view_line_number];
+								manager.AddAdornment(curr_view_line, line_number, line_entry);
+								// Forces the call of GetLineTransform for this line
+								manager.m_TextView.DisplayTextLineContainingBufferPosition(curr_view_line.Start, curr_view_line.Top - text_view.ViewportTop, MVSTE.ViewRelativePosition.Top);
+							}
+						}
+					}
+#if TRACE
+					TraceMsg("Switch from Main LoadFigure");
+#endif
+				});
+			}
+			catch
+			{}
+			finally
+			{
+				bitmap?.Dispose();
+			}
+
+#if TRACE
+			LeaveFunction();
+#endif
+			return;
+		}
+
+		/// <summary>
+		/// This timer is fired after the user hasn't changed the text for 1500 ms and there are files to load.
+		/// </summary>
+		/// <remarks>This function is called by the framework on a Worker Thread</remarks>
+		private static void OnTimerElapsed(int timer_start_id)
+		{
+			SCG.Dictionary<FigureParams, SCG.HashSet<LineID>> figure_load_queue;
 			lock ((s_LineLoadQueue as SC.ICollection).SyncRoot)
 			{
-				foreach (SCG.KeyValuePair<LineId, FigureParams> pair in s_LineLoadQueue)
+				if (s_LoadingTimerStartID != timer_start_id)
+				{
+					// The timer had been stopped just before this event was raised. Skip this event.
+					return;
+				}
+
+#if TRACE
+				EnterFunction();
+#endif
+				// Create a list of lines for each figure. It's possible that more than one lines are waiting for the same figure to be loaded.
+				figure_load_queue = new SCG.Dictionary<FigureParams, SCG.HashSet<LineID>>();
+				foreach (SCG.KeyValuePair<LineID, FigureParams> pair in s_LineLoadQueue)
 				{
 					FigureParams figure_params = pair.Value;
-					LineId line_id = pair.Key;
-					if (figure_load_queue.TryGetValue(figure_params, out SCG.List<LineId> line_list))
+					LineID line_id = pair.Key;
+					if (figure_load_queue.TryGetValue(figure_params, out SCG.HashSet<LineID> line_ids))
 					{
-						line_list.Add(line_id);
+						line_ids.Add(line_id);
 					}
 					else
 					{
-						line_list = new SCG.List<LineId>
-						{
-							line_id
-						};
-						figure_load_queue.Add(figure_params, line_list);
+						line_ids = new SCG.HashSet<LineID> { line_id };
+						figure_load_queue.Add(figure_params, line_ids);
 					}
 				}
+				s_LineLoadQueue.Clear();
 			}
 
 			// Iterate through figures, and try to load them. Create a list of those lines that can be refreshed after their figures have been loaded.
 			// s_LineLoadQueue can't be locked, because Figure.GenerateImage switches back to Main thread, and if Main is currently waiting for s_LineLoadQueue, there will be a deadlock
-			foreach (SCG.KeyValuePair<FigureParams, SCG.List<LineId>> pair in figure_load_queue)
+			foreach (SCG.KeyValuePair<FigureParams, SCG.HashSet<LineID>> pair in figure_load_queue)
 			{
 				FigureParams figure_params = pair.Key;
-				string figure_path = figure_params.m_FigurePath;
 
-				if (!SIO.File.Exists(figure_path))
-				{
-					continue;
-				}
-
-				Figure figure = new Figure(figure_path, m_TextView.ZoomLevel / 100.0, figure_params.m_ColorTheme, figure_params.m_Inverted);
-				figure.GenerateImage();
-
-				if (null != figure.m_BitmapImage)
-				{
-					SCG.List<LineId> line_list = pair.Value;
-					foreach (LineId line_id in line_list)
-					{
-						lines_to_update.Add(new LineUpdateInfo(line_id, figure));
-					}
-				}
+				var task = new STT.Task(LoadFigure, new FigureLoadParams(figure_params.m_FigureCacheID, pair.Value, figure_params.m_ColorTheme));
+				task.Start();
+				// Although System.Threading.Tasks.Task is IDisposable, it's not necessary to call its Dispose() function.
+				// https://devblogs.microsoft.com/pfxteam/do-i-need-to-dispose-of-tasks/
 			}
-
-			lock ((s_LineLoadQueue as SC.ICollection).SyncRoot)
-			{
-				// Remove those lines of which the figure has just been loaded
-				foreach (LineUpdateInfo line_id_figure in lines_to_update)
-				{
-					s_LineLoadQueue.Remove(line_id_figure.m_LineId);
-				}
-			}
-
-			// Switch to Main thread.
-			// We access s_Figures only on Main thread, and updating IWpfTextView should also happen on Main thread
-			Microsoft.VisualStudio.Shell.ThreadHelper.JoinableTaskFactory.Run(async delegate
-			{
-				await Microsoft.VisualStudio.Shell.ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-
-#if TRACE
-				TraceMsg("Switch to Main OnTimerElapsed");
-#endif
-
-				CleanUpCache();
-
-				// Refresh those lines of which the figure has just been loaded
-				foreach (LineUpdateInfo line_id_figure in lines_to_update)
-				{
-					EmbedFigureManager manager = line_id_figure.m_LineId.m_Manager;
-					int line_number = line_id_figure.m_LineId.m_LineNumber;
-					MVSTE.IWpfTextView text_view = manager.m_TextView;
-
-					// Get the first line from text_view.TextViewLines, this is not the same as text_view.TextViewLines.FirstVisibleLine.
-					// It's possible that text_view.TextViewLines[0] is hidden and it's before text_view.TextViewLines.FirstVisibleLine
-					MVSTF.IWpfTextViewLine first_view_line = text_view.TextViewLines[0];
-					int first_view_line_number = text_view.TextSnapshot.GetLineNumberFromPosition(first_view_line.Start);
-					int view_line_number = line_number - first_view_line_number;
-
-					// Skip lines that has no corresponding line in text_view.TextViewLines
-					if (0 > view_line_number)
-					{
-						continue;
-					}
-					if (manager.m_TextView.TextViewLines.Count <= view_line_number)
-					{
-						continue;
-					}
-
-					// Refresh line
-					LineEntry line_entry = m_LineFigures[line_number];
-					line_entry.m_Figure = line_id_figure.m_Figure;
-
-					MVSTF.IWpfTextViewLine curr_view_line = manager.m_TextView.TextViewLines[view_line_number];
-					AddAdornment(curr_view_line, line_number, line_entry);
-					// Forces the call of GetLineTransform for this line
-					manager.m_TextView.DisplayTextLineContainingBufferPosition(curr_view_line.Start, curr_view_line.Top - text_view.ViewportTop, MVSTE.ViewRelativePosition.Top);
-				}
-
-				if (0 != s_LineLoadQueue.Count)
-				{
-					s_LoadingTimerActive = true;
-					s_LoadingTimer.Start();
-				}
-			});
 #if TRACE
 			LeaveFunction();
 #endif
 		}
 
+		/// <summary>Called when zoom is changed</summary>
+		/// <remarks>This function is called by the framework on the MainThread</remarks>
 		private void OnZoomLevelChanged(object sender, MVSTE.ZoomLevelChangedEventArgs e)
 		{
 #if TRACE
 			EnterFunction();
 #endif
-			s_LoadingTimerActive = false;
-			s_LoadingTimer.Stop();
-
 			lock ((s_LineLoadQueue as SC.ICollection).SyncRoot)
 			{
-				foreach(SCG.KeyValuePair<int, LineEntry> pair in m_LineFigures)
+				StopLoadingTimer();
+
+				var line_ids_to_remove = new SCG.List<LineID>();
+				foreach (SCG.KeyValuePair<LineID, FigureParams> pair in s_LineLoadQueue)
+				{
+					LineID line_id = pair.Key;
+					FigureParams figure_params = pair.Value;
+					if (this == line_id.m_Manager && figure_params.m_FigureCacheID.m_ZoomLevel != m_TextView.ZoomLevel)
+					{
+						line_ids_to_remove.Add(line_id);
+					}
+				}
+				foreach (LineID line_id in line_ids_to_remove)
+				{
+					s_LineLoadQueue.Remove(line_id);
+				}
+
+				foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineFigures)
 				{
 					LineEntry line_entry = pair.Value;
 					int line_number = pair.Key;
-					m_AdornmentLayer.RemoveAdornmentsByTag(line_number);
-					if (null != line_entry.m_Figure)
+					if (line_entry.m_Added)
 					{
-						s_LineLoadQueue[new LineId(this, line_number)] = new FigureParams(line_entry.m_FigurePath, line_entry.m_Figure.m_ColorTheme, line_entry.m_Figure.m_Inverted);
-
-						line_entry.m_Figure.DecreaseReferenceCount();
-						line_entry.m_Figure = null;
+						m_AdornmentLayer.RemoveAdornmentsByTag(line_number);
 					}
+					line_entry.m_FigureCacheID.m_ZoomLevel = m_TextView.ZoomLevel;
+					s_LineLoadQueue[new LineID(this, line_number)] = new FigureParams(line_entry.m_FigureCacheID, line_entry.m_ColorTheme);
+					line_entry.RemoveFigure();
 				}
+				StartLoadingTimer();
 			}
-			s_LoadingTimerActive = true;
-			s_LoadingTimer.Start();
 #if TRACE
 			LeaveFunction();
 #endif
@@ -1071,20 +1189,21 @@ namespace EmbedFigure
 #if TRACE
 		internal static void TraceMsg(string message)
 		{
-			Trace.Write("==== " + s_ThreadName.Value + " ");
+			TRC_SD.Trace.Write("==== " + s_ThreadName.Value + " ");
 			for (int i = 0; i < s_Indent.Value; ++i)
 			{
-				Trace.Write(" ");
+				TRC_SD.Trace.Write(" ");
 			}
-			Trace.WriteLine(message);
+			TRC_SD.Trace.WriteLine(message);
 		}
 
-		internal static void EnterFunction([CallerMemberName] string function_name = "")
+		internal static void EnterFunction([TRC_SRCS.CallerMemberName] string function_name = "")
 		{
 			TraceMsg("Enter: " + function_name);
 			s_Indent.Value += 2;
 		}
-		internal static void LeaveFunction([CallerMemberName] string function_name = "")
+
+		internal static void LeaveFunction([TRC_SRCS.CallerMemberName] string function_name = "")
 		{
 			s_Indent.Value -= 2;
 			TraceMsg("Leave: " + function_name);

@@ -58,6 +58,7 @@ namespace EmbedFigure
 		/// Called when a text view having matching roles is created over a text data model having a matching content type.
 		/// Instantiates a <see cref="EmbedFigureManager"/> when the textView is created, if it wasn't already instantiated.
 		/// </summary>
+		/// <remarks>This function is called by the framework on Main Thread</remarks>
 		/// <param name="text_view">The view upon which the adornment should be placed</param>
 		public void TextViewCreated(MVSTE.IWpfTextView text_view)
 		{
@@ -91,8 +92,9 @@ namespace EmbedFigure
 
 		/// <summary>
 		/// Called when a text view having matching roles is created over a text data model having a matching content type.
-		/// Instantiates a <see cref="EmbedFigureManager"/> when the <see cref="MVSTF.ILineTransformSource"> is created, if it wasn't already instantiated.
+		/// Instantiates a <see cref="EmbedFigureManager"/> when the <see cref="MVSTF.ILineTransformSource"/> is created, if it wasn't already instantiated.
 		/// </summary>
+		/// <remarks>This function is called by the framework on Main Thread</remarks>
 		/// <param name="text_view">The view upon which the adornment should be placed</param>
 		public MVSTF.ILineTransformSource Create(MVSTE.IWpfTextView text_view)
 		{
