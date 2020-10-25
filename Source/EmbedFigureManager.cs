@@ -271,7 +271,7 @@ namespace EmbedFigure
 		/// Do not load and render figures at once while user is still typing, rather wait some time to let things settle down a bit.
 		/// Load is commenced when this timer is elapsed.
 		/// </remarks>
-		private static readonly System.Timers.Timer s_LoadingTimer = new System.Timers.Timer(5000);
+		private static readonly ST.Timer s_LoadingTimer = new ST.Timer(1500);
 
 		/// <summary>
 		/// Stores the figures to load and the lines to refresh
@@ -791,17 +791,17 @@ namespace EmbedFigure
 			int line_number = text_snapshot.GetLineNumberFromPosition(line.Start);
 			var line_id = new LineID(this, line_number);
 
-			lock ((s_LineLoadQueue as SC.ICollection).SyncRoot)
-			{
-				s_LineLoadQueue.Remove(line_id);
-			}
-
 			if (null == dictionary_path)
 			{
 				// Currently there's no figure specified in this line
 				if (m_LineFigures.TryGetValue(line_number, out LineEntry old_line_entry))
 				{
 					// But there was a figure in this line previously. Remove previous figure.
+					lock ((s_LineLoadQueue as SC.ICollection).SyncRoot)
+					{
+						s_LineLoadQueue.Remove(line_id);
+					}
+
 					s_FileWatcher.RemoveFile(old_line_entry.m_FigureCacheID.m_DictionaryPath, old_line_entry.m_FigureCacheID.m_Filename);
 					old_line_entry.RemoveFigure();
 					m_LineFigures.Remove(line_number);
@@ -816,6 +816,8 @@ namespace EmbedFigure
 				if (m_LineFigures.TryGetValue(line_number, out LineEntry line_entry))
 				{
 					// There's a figure in this line and there was a figure in this line previously
+					line_entry.m_ColorTheme = color_theme;
+
 					if (line_entry.m_FigureCacheID.m_DictionaryPath != dictionary_path ||
 						line_entry.m_FigureCacheID.m_Filename       != filename ||
 						line_entry.m_FigureCacheID.m_Inverted       != inverted ||
@@ -835,6 +837,7 @@ namespace EmbedFigure
 
 						if (s_FigureCache.TryGetValue(figure_cache_id, out Figure figure) && figure.m_ZoomLevel == m_TextView.ZoomLevel)
 						{
+							// This figure is already loaded, so just use it.
 							figure.IncreaseReferenceCount();
 							line_entry.m_Figure = figure;
 							AddAdornment(line, line_number, line_entry);
@@ -843,7 +846,7 @@ namespace EmbedFigure
 						{
 							lock ((s_LineLoadQueue as SC.ICollection).SyncRoot)
 							{
-								s_LineLoadQueue.Add(line_id, new FigureParams(figure_cache_id, color_theme));
+								s_LineLoadQueue[line_id] = new FigureParams(figure_cache_id, color_theme);
 							}
 						}
 					}
@@ -890,34 +893,58 @@ namespace EmbedFigure
 
 		private void OnBackgroundChanged(object sender, MVSTE.BackgroundBrushChangedEventArgs e)
 		{
+			ColorTheme color_theme = GetColorThemeFromBrush(e.NewBackgroundBrush);
+			if (color_theme == m_ColorTheme)
+			{
+				return;
+			}
 #if TRACE
 			EnterFunction();
 #endif
+			m_ColorTheme = color_theme;
+
 			lock ((s_LineLoadQueue as SC.ICollection).SyncRoot)
 			{
 				StopLoadingTimer();
 
-				ColorTheme background_tone = GetColorThemeFromBrush(e.NewBackgroundBrush);
-				if (background_tone != m_ColorTheme)
+				var line_ids_to_remove = new SCG.List<LineID>();
+				foreach (SCG.KeyValuePair<LineID, FigureParams> pair in s_LineLoadQueue)
 				{
-					m_ColorTheme = background_tone;
+					LineID line_id = pair.Key;
+					FigureParams figure_params = pair.Value;
+					bool inverted = ColorTheme.Unspecified != figure_params.m_ColorTheme && figure_params.m_ColorTheme != m_ColorTheme;
+					if (this == line_id.m_Manager && figure_params.m_FigureCacheID.m_Inverted != inverted)
+					{
+						line_ids_to_remove.Add(line_id);
+					}
+				}
+				foreach (LineID line_id in line_ids_to_remove)
+				{
+					s_LineLoadQueue.Remove(line_id);
 				}
 
 				foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineFigures)
 				{
 					LineEntry line_entry = pair.Value;
 					int line_number = pair.Key;
-					m_AdornmentLayer.RemoveAdornmentsByTag(line_number);
-					if (null != line_entry.m_Figure)
+					// If color theme is unspecified, leave the figure as it is
+					if (ColorTheme.Unspecified == line_entry.m_ColorTheme)
 					{
-						ColorTheme color_theme = line_entry.m_Figure.m_ColorTheme;
-						line_entry.m_FigureCacheID.m_Inverted = ColorTheme.Unspecified != color_theme && color_theme != m_ColorTheme;
-						s_LineLoadQueue.Add(new LineID(this, line_number), new FigureParams(line_entry.m_FigureCacheID, color_theme));
-						line_entry.RemoveFigure();
+						continue;
 					}
+					if (line_entry.m_Added)
+					{
+						m_AdornmentLayer.RemoveAdornmentsByTag(line_number);
+					}
+					line_entry.m_FigureCacheID.m_Inverted = line_entry.m_ColorTheme != m_ColorTheme;
+					s_LineLoadQueue.Add(new LineID(this, line_number), new FigureParams(line_entry.m_FigureCacheID, color_theme));
+					line_entry.RemoveFigure();
 				}
 
-				StartLoadingTimer();
+				if (0 < s_LineLoadQueue.Count)
+				{
+					StartLoadingTimer();
+				}
 			}
 #if TRACE
 			LeaveFunction();
@@ -964,7 +991,7 @@ namespace EmbedFigure
 
 			lock ((s_LineLoadQueue as SC.ICollection).SyncRoot)
 			{
-				if (0 != s_LineLoadQueue.Count)
+				if (0 < s_LineLoadQueue.Count)
 				{
 					StartLoadingTimer();
 				}
@@ -1179,7 +1206,10 @@ namespace EmbedFigure
 					s_LineLoadQueue[new LineID(this, line_number)] = new FigureParams(line_entry.m_FigureCacheID, line_entry.m_ColorTheme);
 					line_entry.RemoveFigure();
 				}
-				StartLoadingTimer();
+				if (0 < s_LineLoadQueue.Count)
+				{
+					StartLoadingTimer();
+				}
 			}
 #if TRACE
 			LeaveFunction();
