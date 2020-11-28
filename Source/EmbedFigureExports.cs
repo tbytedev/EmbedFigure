@@ -25,8 +25,8 @@ using SCMC  = System.ComponentModel.Composition;
 namespace EmbedFigure
 {
 	/// <summary>
-	/// Exports the <see cref="Microsoft.VisualStudio.Text.Editor.IWpfTextViewCreationListener"/> and <see cref="Microsoft.VisualStudio.Text.Editor.AdornmentLayerDefinition"/>
-	/// Instantiates the <see cref="EmbedFigureManager"/> on the event of a <see cref="Microsoft.VisualStudio.Text.Editor.IWpfTextView"/>'s creation, if it wasn't already instantiated.
+	/// Exports the <see cref="MVSTE.IWpfTextViewCreationListener"/> and <see cref="MVSTE.AdornmentLayerDefinition"/>
+	/// Instantiates the <see cref="EmbedFigureManager"/> on the event of a <see cref="MVSTE.IWpfTextView"/>'s creation, if it wasn't already instantiated.
 	/// </summary>
 	[MVSTE.TextViewRole(MVSTE.PredefinedTextViewRoles.Document)]
 	[MVSU.ContentType("code")]
@@ -68,7 +68,7 @@ namespace EmbedFigure
 			}
 
 			// The adornment will listen to any event that changes the layout (text changes, scrolling, etc)
-			EmbedFigureManager adornment = text_view.Properties.GetOrCreateSingletonProperty(() => new EmbedFigureManager(text_view, m_TextDocumentFactoryService));
+			text_view.Properties.GetOrCreateSingletonProperty(() => new EmbedFigureManager(text_view, m_TextDocumentFactoryService));
 		}
 	}
 
@@ -98,8 +98,8 @@ namespace EmbedFigure
 		/// <param name="text_view">The view upon which the adornment should be placed</param>
 		public MVSTF.ILineTransformSource Create(MVSTE.IWpfTextView text_view)
 		{
-			EmbedFigureManager adornment = text_view.Properties.GetOrCreateSingletonProperty(() => new EmbedFigureManager(text_view, m_TextDocumentFactoryService));
-			return new EmbedFigureLineTransformSource(adornment);
+			EmbedFigureManager manager = text_view.Properties.GetOrCreateSingletonProperty(() => new EmbedFigureManager(text_view, m_TextDocumentFactoryService));
+			return new EmbedFigureLineTransformSource(manager);
 		}
 	}
 }
