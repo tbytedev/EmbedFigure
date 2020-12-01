@@ -47,7 +47,6 @@
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Source\EmbedFigureManager.cs" />
     <Compile Include="Source\EmbedFigureExports.cs" />
-    <Compile Include="Source\FileWatcher.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="source.extension.vsixmanifest">

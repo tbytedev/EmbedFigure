@@ -485,29 +485,24 @@ namespace EmbedFigure
 			}
 			s_LineLoadQueue.Clear();
 
-			// Iterate through figures, and try to load them. Create a list of those lines that can be refreshed after their figures have been loaded.
-			// s_LineLoadQueue can't be locked, because Figure.GenerateImage switches back to Main thread, and if Main is currently waiting for s_LineLoadQueue, there will be a deadlock
+			// Iterate through figures, check if they're up to date otherwise try to load them.
 			foreach (SCG.KeyValuePair<FigureCacheID, SCG.HashSet<LineID>> pair in figure_load_queue)
 			{
 				FigureCacheID figure_cache_id = pair.Key;
-				SCG.HashSet<LineID> line_ids = pair.Value;
 				var file_info = new SIO.FileInfo(figure_cache_id.m_FigurePath);
 				if (s_FigureCache.TryGetValue(figure_cache_id, out FigureCacheEntry figure_cache_entry))
 				{
+					// This figure has already been registered to cache
+					// Check if update is necessary
 					if (figure_cache_entry.m_UpdateID == s_UpdateID)
 					{
 						continue;
 					}
+					figure_cache_entry.m_UpdateID = s_UpdateID;
 					if (!file_info.Exists)
 					{
-						figure_cache_entry.m_UpdateID = s_UpdateID;
-						figure_cache_entry.m_LastWriteTimeUtc = S.DateTime.MinValue;
-
-						foreach (LineID line_id in figure_cache_entry.m_LineIDs)
-						{
-							EmbedFigureManager manager = line_id.m_Manager;
-							manager.RemoveAdornment(manager.m_LineFigures[line_id.m_LineNumber], line_id.m_LineNumber);
-						}
+						// This figure has been deleted.
+						UnloadFigure(figure_cache_entry);
 						continue;
 					}
 					if (file_info.LastWriteTimeUtc == figure_cache_entry.m_LastWriteTimeUtc)
@@ -515,18 +510,11 @@ namespace EmbedFigure
 						continue;
 					}
 
-					figure_cache_entry.m_LastWriteTimeUtc = S.DateTime.MinValue;
-					figure_cache_entry.m_Figure = null;
-
-					foreach (LineID line_id in figure_cache_entry.m_LineIDs)
-					{
-						EmbedFigureManager manager = line_id.m_Manager;
-						manager.RemoveAdornment(manager.m_LineFigures[line_id.m_LineNumber], line_id.m_LineNumber);
-					}
+					UnloadFigure(figure_cache_entry);
 				}
 				else
 				{
-					figure_cache_entry = new FigureCacheEntry(line_ids);
+					figure_cache_entry = new FigureCacheEntry(pair.Value);
 					s_FigureCache.Add(figure_cache_id, figure_cache_entry);
 					if (!file_info.Exists)
 					{
@@ -540,6 +528,27 @@ namespace EmbedFigure
 				task.Start();
 				// Although System.Threading.Tasks.Task is IDisposable, it's not necessary to call its Dispose() function.
 				// https://devblogs.microsoft.com/pfxteam/do-i-need-to-dispose-of-tasks/
+			}
+		}
+
+		private static void UnloadFigure(FigureCacheEntry figure_cache_entry)
+		{
+			if (null != figure_cache_entry.m_Figure)
+			{
+				foreach (LineID line_id in figure_cache_entry.m_LineIDs)
+				{
+					EmbedFigureManager manager = line_id.m_Manager;
+					int line_number = line_id.m_LineNumber;
+					LineEntry line_entry = manager.m_LineFigures[line_number];
+					if (line_entry.m_Added)
+					{
+						manager.m_AdornmentLayer.RemoveAdornmentsByTag(line_number);
+					}
+					line_entry.m_Figure = null;
+				}
+				figure_cache_entry.m_Figure.Dispose();
+				figure_cache_entry.m_Figure = null;
+				figure_cache_entry.m_LastWriteTimeUtc = S.DateTime.MinValue;
 			}
 		}
 
@@ -1028,7 +1037,7 @@ namespace EmbedFigure
 				{
 					// But there was a figure in this line previously. Remove previous figure.
 					s_LineLoadQueue.Remove(line_id);
-					RemoveAdornment(old_line_entry, line_number);
+					RemoveFigure(old_line_entry, line_number);
 					m_LineFigures.Remove(line_number);
 				}
 			}
@@ -1048,7 +1057,7 @@ namespace EmbedFigure
 						line_entry.m_FigureCacheID.m_ZoomLevel  != zoom_level)
 					{
 						// The current and the previous figures are different
-						RemoveAdornment(line_entry, line_number);
+						RemoveFigure(line_entry, line_number);
 
 						FigureCacheID figure_cache_id = new FigureCacheID(figure_path, zoom_level, inverted);
 						line_entry.m_FigureCacheID = figure_cache_id;
@@ -1096,7 +1105,7 @@ namespace EmbedFigure
 			}
 		}
 
-		private void RemoveAdornment(LineEntry line_entry, int line_number)
+		private void RemoveFigure(LineEntry line_entry, int line_number)
 		{
 			if (null != line_entry.m_Figure)
 			{
@@ -1167,7 +1176,7 @@ namespace EmbedFigure
 					continue;
 				}
 
-				RemoveAdornment(line_entry, line_number);
+				RemoveFigure(line_entry, line_number);
 				FigureCacheID figure_cache_id = line_entry.m_FigureCacheID;
 				figure_cache_id.m_Inverted = line_entry.m_ColorTheme != m_ColorTheme;
 				if (s_FigureCache.TryGetValue(figure_cache_id, out FigureCacheEntry figure_cache_entry))
@@ -1292,7 +1301,7 @@ namespace EmbedFigure
 			{
 				LineEntry line_entry = pair.Value;
 				int line_number = pair.Key;
-				RemoveAdornment(line_entry, line_number);
+				RemoveFigure(line_entry, line_number);
 				FigureCacheID figure_cache_id = line_entry.m_FigureCacheID;
 				figure_cache_id.m_ZoomLevel = m_TextView.ZoomLevel;
 				if (s_FigureCache.TryGetValue(figure_cache_id, out FigureCacheEntry figure_cache_entry))
