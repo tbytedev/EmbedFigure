@@ -73,8 +73,8 @@ namespace EmbedFigure
 	}
 
 	/// <summary>
-	/// Exports the <see cref="Microsoft.VisualStudio.Text.Editor.IWpfTextViewCreationListener"/> and <see cref="Microsoft.VisualStudio.Text.Editor.AdornmentLayerDefinition"/>
-	/// Instantiates the <see cref="EmbedFigureManager"/> on the event of a <see cref="EmbedFigureLineTransformSourceProvider.Create(MVSTE.IWpfTextView)"/>, if it wasn't already instantiated.
+	/// Exports the <see cref="MVSTE.IWpfTextViewCreationListener"/> and <see cref="MVSTE.AdornmentLayerDefinition"/>
+	/// Instantiates the <see cref="EmbedFigureManager"/> on the event of a <see cref="Create(MVSTE.IWpfTextView)"/>, if it wasn't already instantiated.
 	/// </summary>
 	[MVSTE.TextViewRole(MVSTE.PredefinedTextViewRoles.Interactive)]
 	[MVSU.ContentType("code")]
