@@ -16,7 +16,8 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-#define TRACE
+//#undef DEBUG
+//#undef TRACE
 
 using MVS   = Microsoft.VisualStudio;
 using MVSS  = Microsoft.VisualStudio.Shell;
@@ -152,7 +153,6 @@ namespace EmbedFigure
 		internal Figure m_Figure;
 		internal uint m_UpdateID = EmbedFigureManager.s_UpdateID;
 		internal S.DateTime m_LastWriteTimeUtc = S.DateTime.MinValue;
-		internal bool m_LoadingInProgress = false;
 		internal SCG.HashSet<LineID> m_LineIDs;
 
 		internal FigureCacheEntry(SCG.HashSet<LineID> line_ids)
@@ -432,8 +432,14 @@ namespace EmbedFigure
 					TraceMsg("Switched to Main LoadFigureTask");
 #endif
 					FigureCacheEntry figure_cache_entry = figure_load_params.m_FigureCacheEntry;
+					if (0 == figure_cache_entry.m_LineIDs.Count)
+					{
+						// This figure has been removed after the load process was started.
+						memory_stream.Dispose();
+						return;
+					}
+
 					figure_cache_entry.m_Figure = new Figure(memory_stream, height);
-					figure_cache_entry.m_LoadingInProgress = false;
 
 					foreach (LineID line_id in figure_cache_entry.m_LineIDs)
 					{
@@ -515,6 +521,15 @@ namespace EmbedFigure
 				else
 				{
 					figure_cache_entry = new FigureCacheEntry(pair.Value);
+#if DEBUG
+					foreach (SCG.KeyValuePair<FigureCacheID, FigureCacheEntry> cache_pair in s_FigureCache)
+					{
+						foreach (LineID line_id in cache_pair.Value.m_LineIDs)
+						{
+							TRC_SD.Debug.Assert(!pair.Value.Contains(line_id));
+						}
+					}
+#endif
 					s_FigureCache.Add(figure_cache_id, figure_cache_entry);
 					if (!file_info.Exists)
 					{
@@ -523,7 +538,6 @@ namespace EmbedFigure
 					figure_cache_entry.m_LastWriteTimeUtc = file_info.LastWriteTimeUtc;
 				}
 
-				figure_cache_entry.m_LoadingInProgress = true;
 				var task = new STT.Task(LoadFigureTask, new LoadFigureTaskParams(figure_cache_id, figure_cache_entry));
 				task.Start();
 				// Although System.Threading.Tasks.Task is IDisposable, it's not necessary to call its Dispose() function.
@@ -1107,19 +1121,47 @@ namespace EmbedFigure
 
 		private void RemoveFigure(LineEntry line_entry, int line_number)
 		{
+			FigureCacheEntry figure_cache_entry = s_FigureCache[line_entry.m_FigureCacheID];
 			if (null != line_entry.m_Figure)
 			{
 				if (line_entry.m_Added)
 				{
 					m_AdornmentLayer.RemoveAdornmentsByTag(line_number);
 				}
-				FigureCacheEntry figure_cache_entry = s_FigureCache[line_entry.m_FigureCacheID];
-				if (figure_cache_entry.RemoveLineID(new LineID(this, line_number)) && !s_FigureCache[line_entry.m_FigureCacheID].m_LoadingInProgress)
+				if (figure_cache_entry.RemoveLineID(new LineID(this, line_number)))
 				{
 					line_entry.m_Figure.Dispose();
 					s_FigureCache.Remove(line_entry.m_FigureCacheID);
 				}
 				line_entry.m_Figure = null;
+			}
+			else
+			{
+				if (figure_cache_entry.RemoveLineID(new LineID(this, line_number)))
+				{
+					s_FigureCache.Remove(line_entry.m_FigureCacheID);
+				}
+			}
+		}
+
+		private void RemoveFiguresFromLine(int first_line_to_remove)
+		{
+			var lines_to_remove = new SCG.Dictionary<int, LineEntry>();
+			foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineFigures)
+			{
+				if (pair.Key >= first_line_to_remove)
+				{
+					lines_to_remove.Add(pair.Key, pair.Value);
+				}
+			}
+
+			foreach (SCG.KeyValuePair<int, LineEntry> pair in lines_to_remove)
+			{
+				int line_number = pair.Key;
+				LineEntry line_entry = pair.Value;
+				s_LineLoadQueue.Remove(new LineID(this, line_number));
+				RemoveFigure(line_entry, line_number);
+				m_LineFigures.Remove(line_number);
 			}
 		}
 
@@ -1249,10 +1291,6 @@ namespace EmbedFigure
 		/// <param name="e">The event arguments.</param>
 		private void OnLayoutChanged(object sender, MVSTE.TextViewLayoutChangedEventArgs e)
 		{
-			if (0 == e.NewOrReformattedLines.Count)
-			{
-				return;
-			}
 #if TRACE
 			EnterFunction();
 #endif
@@ -1261,6 +1299,12 @@ namespace EmbedFigure
 			foreach (MVSTF.ITextViewLine line in e.NewOrReformattedLines)
 			{
 				ProcessLine(line);
+			}
+
+			// Remove figures from the last lines which were deleted.
+			if (e.OldSnapshot.LineCount > e.NewSnapshot.LineCount)
+			{
+				RemoveFiguresFromLine(e.NewSnapshot.LineCount);
 			}
 
 			if (0 < s_LineLoadQueue.Count)
@@ -1381,7 +1425,7 @@ namespace EmbedFigure
 			double figure_height = 0.0;
 			if (m_Manager.m_LineFigures.TryGetValue(line_number, out LineEntry line_entry))
 			{
-				if (null != line_entry.m_Figure && line_entry.m_Added)
+				if (null != line_entry.m_Figure)
 				{
 					figure_height = line_entry.m_Figure.m_Height;
 				}
