@@ -1,6 +1,6 @@
 ﻿/*
  * EmbedFigure - Visual Studio extension for embedding math figures into source code
- * Copyright(C) 2020 Tamas Kezdi
+ * Copyright(C) 2021 Tamas Kezdi
  *
  * This program is free software : you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,7 +17,16 @@
  */
 
 //#undef DEBUG
-//#undef TRACE
+#undef TRACE
+
+#if TRACE
+#define TRACE_LAYOUT_CHANGED
+#define TRACE_ADORNMENT_ADD_LINE_NUMBER
+#define TRACE_ADORNMENT_REMOVE_LINE_NUMBER
+#define TRACE_LINE_TRANSFORM_LINE_NUMBERS
+#endif
+
+#define HANDLE_FOCUS
 
 using MVS   = Microsoft.VisualStudio;
 using MVSS  = Microsoft.VisualStudio.Shell;
@@ -37,19 +46,38 @@ using SWC   = System.Windows.Controls;
 using SWM   = System.Windows.Media;
 using SWMI  = System.Windows.Media.Imaging;
 
-#if TRACE
+#if TRACE || DEBUG
 using TRC_SD   = System.Diagnostics;
+#endif
+
+#if TRACE
 using TRC_ST   = System.Threading;
 using TRC_SRCS = System.Runtime.CompilerServices;
 #endif
 
 namespace EmbedFigure
 {
-	enum ColorTheme
+	internal enum ColorTheme
 	{
 		Unspecified,
 		Light,
 		Dark
+	}
+
+	internal struct ChangeRanges
+	{
+		internal int m_OldFirstLineNumber;
+		internal int m_OldLastLineNumber;
+		internal int m_NewFirstLineNumber;
+		internal int m_NewLastLineNumber;
+		internal int m_LineCountDelta;
+	}
+
+	internal struct LineNumberShift
+	{
+		internal int m_OldLineNumber;
+		internal int m_NewLineNumber;
+		internal LineEntry m_LineEntry;
 	}
 
 	/// <summary>
@@ -83,8 +111,8 @@ namespace EmbedFigure
 	internal class FigureCacheID
 	{
 		internal readonly string m_FigurePath;
-		internal double m_ZoomLevel;
-		internal bool m_Inverted;
+		internal readonly double m_ZoomLevel;
+		internal readonly bool m_Inverted;
 
 		internal FigureCacheID(string figure_path, double zoom_level, bool inverted)
 		{
@@ -103,7 +131,7 @@ namespace EmbedFigure
 		/// </remarks>
 		public override bool Equals(object obj)
 		{
-			return obj is FigureCacheID id && m_FigurePath == id.m_FigurePath && m_Inverted == id.m_Inverted;
+			return obj is FigureCacheID id && m_FigurePath == id.m_FigurePath && m_ZoomLevel == id.m_ZoomLevel && m_Inverted == id.m_Inverted;
 		}
 
 		/// <summary>
@@ -124,13 +152,15 @@ namespace EmbedFigure
 		}
 	}
 
-	internal readonly struct FigureLoadQueueParams
+	internal readonly struct FigureLoadQueueEntry
 	{
+		internal readonly EmbedFigureManager m_Manager;
 		internal readonly FigureCacheID m_FigureCacheID;
 		internal readonly ColorTheme m_ColorTheme;
 
-		internal FigureLoadQueueParams(FigureCacheID figure_cache_id, ColorTheme color_tone)
+		internal FigureLoadQueueEntry(EmbedFigureManager manager, FigureCacheID figure_cache_id, ColorTheme color_tone)
 		{
+			m_Manager = manager;
 			m_FigureCacheID = figure_cache_id;
 			m_ColorTheme = color_tone;
 		}
@@ -150,14 +180,15 @@ namespace EmbedFigure
 
 	internal class FigureCacheEntry
 	{
-		internal Figure m_Figure;
-		internal uint m_UpdateID = EmbedFigureManager.s_UpdateID;
-		internal S.DateTime m_LastWriteTimeUtc = S.DateTime.MinValue;
-		internal SCG.HashSet<LineID> m_LineIDs;
+		internal readonly SCG.HashSet<LineID> m_LineIDs;
 
-		internal FigureCacheEntry(SCG.HashSet<LineID> line_ids)
+		internal Figure m_Figure;
+		internal uint m_UpdateID = uint.MaxValue;
+		internal S.DateTime m_LastWriteTimeUtc = S.DateTime.MinValue;
+
+		internal FigureCacheEntry(LineID line_id)
 		{
-			m_LineIDs = line_ids;
+			m_LineIDs = new SCG.HashSet<LineID>() { line_id };
 		}
 
 		internal void AddLineID(LineID line_id)
@@ -180,7 +211,7 @@ namespace EmbedFigure
 		internal ColorTheme m_ColorTheme;
 		internal bool m_Added = false;
 
-		public LineEntry(FigureCacheID figure_cache_id, ColorTheme color_theme)
+		internal LineEntry(FigureCacheID figure_cache_id, ColorTheme color_theme)
 		{
 			m_FigureCacheID = figure_cache_id;
 			m_ColorTheme = color_theme;
@@ -199,7 +230,7 @@ namespace EmbedFigure
 		}
 	}
 
-	enum ParameterType
+	internal enum ParameterType
 	{
 		UnknownParameter,
 		ColorTheme,
@@ -219,6 +250,7 @@ namespace EmbedFigure
 		}
 	}
 
+#if HANDLE_FOCUS
 	internal class VSEvents : MVSSI.IVsBroadcastMessageEvents
 	{
 		const uint WM_ACTIVATEAPP = 0x001C;
@@ -240,12 +272,17 @@ namespace EmbedFigure
 			return MVS.VSConstants.S_OK;
 		}
 	}
+#endif
 
 	/// <summary>
 	/// TextAdornment to place figures after #EmbedFigure instructions
 	/// </summary>
 	internal class EmbedFigureManager
 	{
+		// ----------------------------------------------------------------
+		// Static members
+		// ----------------------------------------------------------------
+
 		/// <summary>
 		/// Stores rendered figures for each path in <see cref="SWMI.BitmapImage">BitmapImages</see>
 		/// It's accessed only from Main thread
@@ -271,22 +308,24 @@ namespace EmbedFigure
 		private static readonly char[] s_InvalidChars;
 
 		/// <summary>
-		/// This timer is fired after the user hasn't changed the text for 1500 ms and there are files to load.
+		/// This timer is fired after the user hasn't changed the text for 1500 ms and there are files to load, or the cache can be cleaned up.
 		/// </summary>
 		/// <remarks>
 		/// Do not load and render figures at once while user is still typing, rather wait some time to let things settle down a bit.
 		/// Load is commenced when this timer is elapsed.
 		/// </remarks>
-		private static readonly ST.Timer s_LoadingTimer = new ST.Timer(1500);
+		private static readonly ST.Timer s_Timer = new ST.Timer(1500);
 
 		/// <summary>
 		/// Stores the figures to load and the lines to refresh
 		/// It's accessed only from Main thread
 		/// </summary>
-		private static readonly SCG.Dictionary<LineID, FigureLoadQueueParams> s_LineLoadQueue = new SCG.Dictionary<LineID, FigureLoadQueueParams>();
+		private static readonly SCG.HashSet<FigureLoadQueueEntry> s_FigureLoadQueue = new SCG.HashSet<FigureLoadQueueEntry>();
 
+#if HANDLE_FOCUS
 		private static readonly MVSSI.IVsShell s_VSShell;
 		private static readonly VSEvents s_VSEvents;
+#endif
 
 #if TRACE
 		private static readonly TRC_ST.ThreadLocal<string> s_ThreadName = new TRC_ST.ThreadLocal<string>(() => { return "Thread " + (10 > TRC_ST.Thread.CurrentThread.ManagedThreadId ? " " + TRC_ST.Thread.CurrentThread.ManagedThreadId : TRC_ST.Thread.CurrentThread.ManagedThreadId.ToString()); });
@@ -295,18 +334,20 @@ namespace EmbedFigure
 
 		internal static uint s_UpdateID = 0;
 
-		private static ST.ElapsedEventHandler s_LoadingTimerEventHandler;
+		private static bool s_CacheCanHaveUnreferencedEntries = false;
+
+		private static ST.ElapsedEventHandler s_TimerEventHandler;
 
 		/// <summary>
 		/// Indicates if the timer is active.
 		/// </summary>
 		/// <remarks>
-		/// <see cref="TimerElapsed">OnTimerElapsed</see> may be raised even after <see cref="s_LoadingTimer">s_LoadingTimer</see> has been stopped.
+		/// <see cref="TimerElapsed"/> may be raised even after <see cref="s_Timer"/> has been stopped.
 		/// The actual value of this ID is copied into the event handled each time the timer has been started, and this ID is incremented each time the timer has been stopped.
 		/// So when the event is raised the event handler can compare its copied ID and the actual ID.
 		/// If the two values are the same no Stop() method has been between the timer start and timer raise.
 		/// </remarks>
-		private static int s_LoadingTimerStartID = 0;
+		private static int s_TimerStartID = 0;
 
 		/// <summary>
 		/// Set up a sorted list of invalid characters, because it's faster to search in sorted arrays.
@@ -323,8 +364,9 @@ namespace EmbedFigure
 			s_InvalidChars = invalid_chars.ToArray();
 			S.Array.Sort(s_InvalidChars);
 
-			s_LoadingTimer.AutoReset = false;
+			s_Timer.AutoReset = false;
 
+#if HANDLE_FOCUS
 			// MVSSI.IVsShell can only be used on main thread. Compiler generates warning if ThrowIfNotOnUIThread is not called before using MVSSI.IVsShell
 			MVSS.ThreadHelper.ThrowIfNotOnUIThread();
 			s_VSShell = MVSS.Package.GetGlobalService(typeof(MVSSI.SVsShell)) as MVSSI.IVsShell;
@@ -333,6 +375,27 @@ namespace EmbedFigure
 				s_VSEvents = new VSEvents();
 				s_VSShell.AdviseBroadcastMessages(s_VSEvents, out uint cookie);
 			}
+#endif
+		}
+
+		private static void CacheCleanup()
+		{
+			var cache_entries_to_remove = new SCG.List<FigureCacheID>();
+
+			foreach (SCG.KeyValuePair<FigureCacheID, FigureCacheEntry> pair in s_FigureCache)
+			{
+				if (0 == pair.Value.m_LineIDs.Count)
+				{
+					cache_entries_to_remove.Add(pair.Key);
+				}
+			}
+
+			foreach (FigureCacheID figure_cache_id in cache_entries_to_remove)
+			{
+				s_FigureCache.Remove(figure_cache_id);
+			}
+
+			s_CacheCanHaveUnreferencedEntries = false;
 		}
 
 		private static ColorTheme GetColorThemeFromBrush(SWM.Brush brush)
@@ -352,30 +415,30 @@ namespace EmbedFigure
 			return ColorTheme.Unspecified;
 		}
 
-		private static void StartLoadingTimer()
+		private static void StartTimer()
 		{
-			// Capture current value of s_LoadingTimerStartID to be used in event handler lambda expression.
-			int loading_timer_start_id = s_LoadingTimerStartID;
+			// Capture current value of s_TimerStartID to be used in event handler lambda expression.
+			int timer_start_id = s_TimerStartID;
 
 			// Create new delegate from lambda with captured timer start ID, and store it to be able to unsubscribe later.
-			s_LoadingTimerEventHandler = (sender, e) => { TimerElapsed(loading_timer_start_id); };
+			s_TimerEventHandler = (sender, e) => { TimerElapsed(timer_start_id); };
 
 			// It's necessary to subscribe a new delegate each time the timer has been started, because every delegate contains a different captured timer start id.
-			s_LoadingTimer.Elapsed += s_LoadingTimerEventHandler;
-			s_LoadingTimer.Start();
+			s_Timer.Elapsed += s_TimerEventHandler;
+			s_Timer.Start();
 		}
 
-		private static void StopLoadingTimer()
+		private static void StopTimer()
 		{
 			// It's possible that Elapsed event is raised after the Stop method is called. Increasing timer start ID invalidates upcoming elapsed event.
-			++s_LoadingTimerStartID;
-			s_LoadingTimer.Stop();
+			++s_TimerStartID;
+			s_Timer.Stop();
 
 			// Unsubscribe event handler
-			if (null != s_LoadingTimerEventHandler)
+			if (null != s_TimerEventHandler)
 			{
-				s_LoadingTimer.Elapsed -= s_LoadingTimerEventHandler;
-				s_LoadingTimerEventHandler = null;
+				s_Timer.Elapsed -= s_TimerEventHandler;
+				s_TimerEventHandler = null;
 			}
 		}
 
@@ -445,9 +508,9 @@ namespace EmbedFigure
 					{
 						EmbedFigureManager manager = line_id.m_Manager;
 						int line_number = line_id.m_LineNumber;
-						LineEntry line_entry = manager.m_LineFigures[line_number];
+						LineEntry line_entry = manager.m_LineEntries[line_number];
 
-						manager.AddAdornment(line_number, line_entry, figure_cache_entry);
+						manager.AddFigure(line_number, line_entry, figure_cache_entry);
 					}
 #if TRACE
 					TraceMsg("Switch from Main LoadFigureTask");
@@ -474,75 +537,49 @@ namespace EmbedFigure
 		{
 			// Create a list of lines for each figure. It's possible that more than one lines are waiting for the same figure to be loaded.
 			var figure_load_queue = new SCG.Dictionary<FigureCacheID, SCG.HashSet<LineID>>();
-			foreach (SCG.KeyValuePair<LineID, FigureLoadQueueParams> pair in s_LineLoadQueue)
+			foreach (FigureLoadQueueEntry figure_load_queue_entry in s_FigureLoadQueue)
 			{
-				FigureLoadQueueParams figure_load_queue_params = pair.Value;
-				LineID line_id = pair.Key;
-				FigureCacheID figure_cache_id = figure_load_queue_params.m_FigureCacheID;
-				if (figure_load_queue.TryGetValue(figure_cache_id, out SCG.HashSet<LineID> line_ids))
-				{
-					line_ids.Add(line_id);
-				}
-				else
-				{
-					line_ids = new SCG.HashSet<LineID> { line_id };
-					figure_load_queue.Add(figure_cache_id, line_ids);
-				}
-			}
-			s_LineLoadQueue.Clear();
+				FigureCacheID figure_cache_id = figure_load_queue_entry.m_FigureCacheID;
+				FigureCacheEntry figure_cache_entry = s_FigureCache[figure_cache_id];
 
-			// Iterate through figures, check if they're up to date otherwise try to load them.
-			foreach (SCG.KeyValuePair<FigureCacheID, SCG.HashSet<LineID>> pair in figure_load_queue)
-			{
-				FigureCacheID figure_cache_id = pair.Key;
+				// Check if there are still lines referring to this cache entry
+				if (0 == figure_cache_entry.m_LineIDs.Count)
+				{
+					continue;
+				}
+
+				// Check if update is necessary
+				if (figure_cache_entry.m_UpdateID == s_UpdateID)
+				{
+					continue;
+				}
+
+				figure_cache_entry.m_UpdateID = s_UpdateID;
+
 				var file_info = new SIO.FileInfo(figure_cache_id.m_FigurePath);
-				if (s_FigureCache.TryGetValue(figure_cache_id, out FigureCacheEntry figure_cache_entry))
-				{
-					// This figure has already been registered to cache
-					// Check if update is necessary
-					if (figure_cache_entry.m_UpdateID == s_UpdateID)
-					{
-						continue;
-					}
-					figure_cache_entry.m_UpdateID = s_UpdateID;
-					if (!file_info.Exists)
-					{
-						// This figure has been deleted.
-						UnloadFigure(figure_cache_entry);
-						continue;
-					}
-					if (file_info.LastWriteTimeUtc == figure_cache_entry.m_LastWriteTimeUtc)
-					{
-						continue;
-					}
 
-					UnloadFigure(figure_cache_entry);
-				}
-				else
+				if (!file_info.Exists)
 				{
-					figure_cache_entry = new FigureCacheEntry(pair.Value);
-#if DEBUG
-					foreach (SCG.KeyValuePair<FigureCacheID, FigureCacheEntry> cache_pair in s_FigureCache)
-					{
-						foreach (LineID line_id in cache_pair.Value.m_LineIDs)
-						{
-							TRC_SD.Debug.Assert(!pair.Value.Contains(line_id));
-						}
-					}
-#endif
-					s_FigureCache.Add(figure_cache_id, figure_cache_entry);
-					if (!file_info.Exists)
-					{
-						continue;
-					}
-					figure_cache_entry.m_LastWriteTimeUtc = file_info.LastWriteTimeUtc;
+					// This figure has been deleted.
+					UnloadFigure(figure_cache_entry);
+					continue;
 				}
+				if (file_info.LastWriteTimeUtc == figure_cache_entry.m_LastWriteTimeUtc)
+				{
+					continue;
+				}
+
+				UnloadFigure(figure_cache_entry);
+				figure_cache_entry.m_LastWriteTimeUtc = file_info.LastWriteTimeUtc;
 
 				var task = new STT.Task(LoadFigureTask, new LoadFigureTaskParams(figure_cache_id, figure_cache_entry));
 				task.Start();
 				// Although System.Threading.Tasks.Task is IDisposable, it's not necessary to call its Dispose() function.
 				// https://devblogs.microsoft.com/pfxteam/do-i-need-to-dispose-of-tasks/
 			}
+
+			s_FigureLoadQueue.Clear();
+
 		}
 
 		private static void UnloadFigure(FigureCacheEntry figure_cache_entry)
@@ -553,7 +590,7 @@ namespace EmbedFigure
 				{
 					EmbedFigureManager manager = line_id.m_Manager;
 					int line_number = line_id.m_LineNumber;
-					LineEntry line_entry = manager.m_LineFigures[line_number];
+					LineEntry line_entry = manager.m_LineEntries[line_number];
 					if (line_entry.m_Added)
 					{
 						manager.m_AdornmentLayer.RemoveAdornmentsByTag(line_number);
@@ -579,7 +616,7 @@ namespace EmbedFigure
 			MVSS.ThreadHelper.JoinableTaskFactory.Run(async delegate
 			{
 				await MVSS.ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-				if (s_LoadingTimerStartID != timer_start_id)
+				if (s_TimerStartID != timer_start_id)
 				{
 					return;
 				}
@@ -588,6 +625,7 @@ namespace EmbedFigure
 				TraceMsg("Switched to Main TimerElapsed");
 #endif
 				ProcessLineLoadQueue();
+				CacheCleanup();
 #if TRACE
 				TraceMsg("Switch from Main TimerElapsed");
 #endif
@@ -599,6 +637,10 @@ namespace EmbedFigure
 			LeaveFunction();
 #endif
 		}
+
+		// ----------------------------------------------------------------
+		// Non static members
+		// ----------------------------------------------------------------
 
 		/// <summary>
 		/// The layer of the adornment.
@@ -613,12 +655,12 @@ namespace EmbedFigure
 		/// <summary>
 		/// Text view where the adornment is created.
 		/// </summary>
-		private readonly MVSTE.IWpfTextView m_TextView;
+		internal readonly MVSTE.IWpfTextView m_TextView;
 
 		/// <summary>
 		/// Stores figure info for each line in this manager
 		/// </summary>
-		internal SCG.Dictionary<int, LineEntry> m_LineFigures = new SCG.Dictionary<int, LineEntry>();
+		internal SCG.SortedDictionary<int, LineEntry> m_LineEntries = new SCG.SortedDictionary<int, LineEntry>();
 
 		/// <summary>
 		/// Current color theme
@@ -653,18 +695,19 @@ namespace EmbedFigure
 
 			m_TextView.BackgroundBrushChanged += OnBackgroundChanged;
 			m_TextView.Closed                 += OnClosed;
+#if HANDLE_FOCUS
 			m_TextView.GotAggregateFocus      += OnGotFocus;
+#endif
 			m_TextView.LayoutChanged          += OnLayoutChanged;
 			m_TextView.ZoomLevelChanged       += OnZoomLevelChanged;
 		}
 
-		private void AddAdornment(MVSTF.ITextViewLine line, int line_number, LineEntry line_entry)
+		private void AddAdornment(MVST.SnapshotSpan snapshot_span, int line_number, LineEntry line_entry)
 		{
 #if TRACE
 			EnterFunction();
 #endif
-			MVST.SnapshotSpan span = line.Extent;
-			SWM.Geometry geometry = m_TextView.TextViewLines.GetMarkerGeometry(span);
+			SWM.Geometry geometry = m_TextView.TextViewLines.GetMarkerGeometry(snapshot_span);
 			if (null != geometry)
 			{
 				var image = new SWC.Image
@@ -675,15 +718,53 @@ namespace EmbedFigure
 
 				SWC.Canvas.SetLeft(image, geometry.Bounds.Left);
 				SWC.Canvas.SetTop(image, geometry.Bounds.Bottom);
-				m_AdornmentLayer.AddAdornment(MVSTE.AdornmentPositioningBehavior.TextRelative, span, line_number, image, OnAdornmentRemoved);
+				m_AdornmentLayer.AddAdornment(MVSTE.AdornmentPositioningBehavior.TextRelative, snapshot_span, line_number, image, OnAdornmentRemoved);
 				line_entry.m_Added = true;
+#if TRACE_ADORNMENT_ADD_LINE_NUMBER
+				TraceMsg("Adornment add line number: " + line_number);
+#endif
 			}
 #if TRACE
 			LeaveFunction();
 #endif
 		}
 
-		private void AddAdornment(int line_number, LineEntry line_entry, FigureCacheEntry figure_cache_entry)
+		private void AddVisibleAdornments(int first_line_number_to_add_adornment, int last_line_number_to_add_adornment)
+		{
+			int first_visible_line_number = m_TextView.TextSnapshot.GetLineNumberFromPosition(m_TextView.TextViewLines.FormattedSpan.Start);
+			int last_visible_line_number = m_TextView.TextSnapshot.GetLineNumberFromPosition(m_TextView.TextViewLines.FormattedSpan.End - 1);
+
+			foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineEntries)
+			{
+				int line_number = pair.Key;
+				if (line_number < first_visible_line_number)
+				{
+					continue;
+				}
+				if (line_number < first_line_number_to_add_adornment)
+				{
+					continue;
+				}
+				if (last_visible_line_number < line_number)
+				{
+					break;
+				}
+				if (last_line_number_to_add_adornment < line_number)
+				{
+					break;
+				}
+
+				LineEntry line_entry = pair.Value;
+				if (null == line_entry.m_Figure || line_entry.m_Added)
+				{
+					continue;
+				}
+				MVST.ITextSnapshotLine text_snapshot_line = m_TextView.TextSnapshot.GetLineFromLineNumber(line_number);
+				AddAdornment(text_snapshot_line.Extent, line_number, line_entry);
+			}
+		}
+
+		private void AddFigure(int line_number, LineEntry line_entry, FigureCacheEntry figure_cache_entry)
 		{
 			figure_cache_entry.AddLineID(new LineID(this, line_number));
 			line_entry.m_Figure = figure_cache_entry.m_Figure;
@@ -692,13 +773,13 @@ namespace EmbedFigure
 				return;
 			}
 
-			// Get the first line from text_view.TextViewLines, this is not the same as text_view.TextViewLines.FirstVisibleLine.
-			// It's possible that text_view.TextViewLines[0] is hidden and it's before text_view.TextViewLines.FirstVisibleLine
+			// Get the first line from m_TextView.TextViewLines, this is not the same as m_TextView.TextViewLines.FirstVisibleLine.
+			// It's possible that m_TextView.TextViewLines[0] is hidden and it's before m_TextView.TextViewLines.FirstVisibleLine
 			MVSTF.IWpfTextViewLine first_view_line = m_TextView.TextViewLines[0];
 			int first_view_line_number = m_TextView.TextSnapshot.GetLineNumberFromPosition(first_view_line.Start);
 			int view_line_number = line_number - first_view_line_number;
 
-			// Skip lines that has no corresponding line in text_view.TextViewLines
+			// Skip lines that has no corresponding line in m_TextView.TextViewLines
 			if (0 > view_line_number)
 			{
 				return;
@@ -710,7 +791,7 @@ namespace EmbedFigure
 
 			// Refresh line
 			MVSTF.IWpfTextViewLine curr_view_line = m_TextView.TextViewLines[view_line_number];
-			AddAdornment(curr_view_line, line_number, line_entry);
+			AddAdornment(curr_view_line.Extent, line_number, line_entry);
 			// Forces the call of GetLineTransform for this line
 			m_TextView.DisplayTextLineContainingBufferPosition(curr_view_line.Start, curr_view_line.Top - m_TextView.ViewportTop, MVSTE.ViewRelativePosition.Top);
 		}
@@ -1034,25 +1115,20 @@ namespace EmbedFigure
 		/// Parse line. Search for #EmbedFigure instruction, and register figure changes.
 		/// </summary>
 		/// <param name="line">Line to add the adornments</param>
-		private void ProcessLine(MVSTF.ITextViewLine line)
+		private void ProcessLine(MVST.SnapshotSpan snapshot_span, string line_text, int line_number)
 		{
+			ParseLine(line_text, out string figure_path, out ColorTheme color_theme);
 
-			MVST.ITextSnapshot text_snapshot = m_TextView.TextSnapshot;
-			ParseLine(text_snapshot.GetText(line.Extent.Span), out string figure_path, out ColorTheme color_theme);
-
-			//MVSTE.IWpfTextViewLineCollection text_view_lines = m_TextView.TextViewLines;
-			int line_number = text_snapshot.GetLineNumberFromPosition(line.Start);
 			var line_id = new LineID(this, line_number);
 
 			if (null == figure_path)
 			{
 				// Currently there's no figure specified in this line
-				if (m_LineFigures.TryGetValue(line_number, out LineEntry old_line_entry))
+				if (m_LineEntries.TryGetValue(line_number, out LineEntry old_line_entry))
 				{
 					// But there was a figure in this line previously. Remove previous figure.
-					s_LineLoadQueue.Remove(line_id);
-					RemoveFigure(old_line_entry, line_number);
-					m_LineFigures.Remove(line_number);
+					RemoveFigure(line_number, old_line_entry);
+					m_LineEntries.Remove(line_number);
 				}
 			}
 			else
@@ -1061,7 +1137,7 @@ namespace EmbedFigure
 				double zoom_level = m_TextView.ZoomLevel;
 				bool inverted = ColorTheme.Unspecified != color_theme && color_theme != m_ColorTheme;
 
-				if (m_LineFigures.TryGetValue(line_number, out LineEntry line_entry))
+				if (m_LineEntries.TryGetValue(line_number, out LineEntry line_entry))
 				{
 					// There's a figure in this line and there was a figure in this line previously
 					line_entry.m_ColorTheme = color_theme;
@@ -1071,7 +1147,7 @@ namespace EmbedFigure
 						line_entry.m_FigureCacheID.m_ZoomLevel  != zoom_level)
 					{
 						// The current and the previous figures are different
-						RemoveFigure(line_entry, line_number);
+						RemoveFigure(line_number, line_entry);
 
 						FigureCacheID figure_cache_id = new FigureCacheID(figure_path, zoom_level, inverted);
 						line_entry.m_FigureCacheID = figure_cache_id;
@@ -1081,19 +1157,11 @@ namespace EmbedFigure
 							// This figure is already loaded, so just use it.
 							figure_cache_entry.AddLineID(line_id);
 							line_entry.m_Figure = figure_cache_entry.m_Figure;
-							if (null != line_entry.m_Figure)
-							{
-								AddAdornment(line, line_number, line_entry);
-							}
 						}
 						else
 						{
-							s_LineLoadQueue[line_id] = new FigureLoadQueueParams(figure_cache_id, color_theme);
+							s_FigureLoadQueue.Add(new FigureLoadQueueEntry(this, figure_cache_id, color_theme));
 						}
-					}
-					else if (null != line_entry.m_Figure && !line_entry.m_Added)
-					{
-						AddAdornment(line, line_number, line_entry);
 					}
 				}
 				else
@@ -1101,68 +1169,45 @@ namespace EmbedFigure
 					// There's a figure in this line and there was no figure in this line previously
 					FigureCacheID figure_cache_id = new FigureCacheID(figure_path, zoom_level, inverted);
 					line_entry = new LineEntry(figure_cache_id, color_theme);
-					m_LineFigures[line_number] = line_entry;
+					m_LineEntries.Add(line_number, line_entry);
 					if (s_FigureCache.TryGetValue(figure_cache_id, out FigureCacheEntry figure_cache_entry))
 					{
 						figure_cache_entry.AddLineID(line_id);
 						line_entry.m_Figure = figure_cache_entry.m_Figure;
-						if (null != line_entry.m_Figure)
-						{
-							AddAdornment(line, line_number, line_entry);
-						}
 					}
 					else
 					{
-						s_LineLoadQueue.Add(line_id, new FigureLoadQueueParams(figure_cache_id, color_theme));
+						s_FigureCache.Add(figure_cache_id, new FigureCacheEntry(line_id));
+						s_FigureLoadQueue.Add(new FigureLoadQueueEntry(this, figure_cache_id, color_theme));
 					}
 				}
 			}
 		}
 
-		private void RemoveFigure(LineEntry line_entry, int line_number)
+		private void RemoveAdornment(int line_number, LineEntry line_entry)
 		{
-			FigureCacheEntry figure_cache_entry = s_FigureCache[line_entry.m_FigureCacheID];
-			if (null != line_entry.m_Figure)
+			if (line_entry.m_Added)
 			{
-				if (line_entry.m_Added)
-				{
-					m_AdornmentLayer.RemoveAdornmentsByTag(line_number);
-				}
-				if (figure_cache_entry.RemoveLineID(new LineID(this, line_number)))
-				{
-					line_entry.m_Figure.Dispose();
-					s_FigureCache.Remove(line_entry.m_FigureCacheID);
-				}
-				line_entry.m_Figure = null;
-			}
-			else
-			{
-				if (figure_cache_entry.RemoveLineID(new LineID(this, line_number)))
-				{
-					s_FigureCache.Remove(line_entry.m_FigureCacheID);
-				}
+				m_AdornmentLayer.RemoveAdornmentsByTag(line_number);
 			}
 		}
 
-		private void RemoveFiguresFromLine(int first_line_to_remove)
+		private void RemoveFigure(int line_number, LineEntry line_entry)
 		{
-			var lines_to_remove = new SCG.Dictionary<int, LineEntry>();
-			foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineFigures)
+			RemoveAdornment(line_number, line_entry);
+			FigureCacheEntry figure_cache_entry = s_FigureCache[line_entry.m_FigureCacheID];
+			if (figure_cache_entry.RemoveLineID(new LineID(this, line_number)))
 			{
-				if (pair.Key >= first_line_to_remove)
-				{
-					lines_to_remove.Add(pair.Key, pair.Value);
-				}
+				s_CacheCanHaveUnreferencedEntries = true;
 			}
+			line_entry.m_Figure = null;
+		}
 
-			foreach (SCG.KeyValuePair<int, LineEntry> pair in lines_to_remove)
-			{
-				int line_number = pair.Key;
-				LineEntry line_entry = pair.Value;
-				s_LineLoadQueue.Remove(new LineID(this, line_number));
-				RemoveFigure(line_entry, line_number);
-				m_LineFigures.Remove(line_number);
-			}
+		private void ShiftFigureLineNumber(LineNumberShift line_number_shift)
+		{
+			FigureCacheEntry figure_cache_entry = s_FigureCache[line_number_shift.m_LineEntry.m_FigureCacheID];
+			figure_cache_entry.RemoveLineID(new LineID(this, line_number_shift.m_OldLineNumber));
+			figure_cache_entry.AddLineID(new LineID(this, line_number_shift.m_NewLineNumber));
 		}
 
 		private void OnAdornmentRemoved(object tag, SW.UIElement element)
@@ -1171,8 +1216,9 @@ namespace EmbedFigure
 			EnterFunction();
 #endif
 			int line_number = (int)tag;
-			m_LineFigures[line_number].m_Added = false;
-#if TRACE
+			m_LineEntries[line_number].m_Added = false;
+#if TRACE_ADORNMENT_REMOVE_LINE_NUMBER
+			TraceMsg("Adornment remove line number: " + line_number);
 			LeaveFunction();
 #endif
 		}
@@ -1189,26 +1235,26 @@ namespace EmbedFigure
 #endif
 			m_ColorTheme = color_theme;
 
-			StopLoadingTimer();
+			StopTimer();
 
 			// Remove those lines from load queue, which are about to load with a different invert value
-			var line_ids_to_remove = new SCG.List<LineID>();
-			foreach (SCG.KeyValuePair<LineID, FigureLoadQueueParams> pair in s_LineLoadQueue)
+			var figure_load_entries_to_remove = new SCG.List<FigureLoadQueueEntry>();
+			foreach (FigureLoadQueueEntry figure_load_queue_entry in s_FigureLoadQueue)
 			{
-				LineID line_id = pair.Key;
-				FigureLoadQueueParams figure_load_queue_params = pair.Value;
-				bool inverted = ColorTheme.Unspecified != figure_load_queue_params.m_ColorTheme && figure_load_queue_params.m_ColorTheme != m_ColorTheme;
-				if (this == line_id.m_Manager && figure_load_queue_params.m_FigureCacheID.m_Inverted != inverted)
+				FigureCacheID figure_cache_id = figure_load_queue_entry.m_FigureCacheID;
+				ColorTheme load_entry_color_theme = figure_load_queue_entry.m_ColorTheme;
+				bool inverted = ColorTheme.Unspecified != load_entry_color_theme && load_entry_color_theme != m_ColorTheme;
+				if (this == figure_load_queue_entry.m_Manager && figure_cache_id.m_Inverted != inverted)
 				{
-					line_ids_to_remove.Add(line_id);
+					figure_load_entries_to_remove.Add(figure_load_queue_entry);
 				}
 			}
-			foreach (LineID line_id in line_ids_to_remove)
+			foreach (FigureLoadQueueEntry figure_load_queue_entry in figure_load_entries_to_remove)
 			{
-				s_LineLoadQueue.Remove(line_id);
+				s_FigureLoadQueue.Remove(figure_load_queue_entry);
 			}
 
-			foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineFigures)
+			foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineEntries)
 			{
 				LineEntry line_entry = pair.Value;
 				int line_number = pair.Key;
@@ -1218,20 +1264,23 @@ namespace EmbedFigure
 					continue;
 				}
 
-				RemoveFigure(line_entry, line_number);
-				FigureCacheID figure_cache_id = line_entry.m_FigureCacheID;
-				figure_cache_id.m_Inverted = line_entry.m_ColorTheme != m_ColorTheme;
+				RemoveFigure(line_number, line_entry);
+				var figure_cache_id = new FigureCacheID(line_entry.m_FigureCacheID.m_FigurePath, line_entry.m_FigureCacheID.m_ZoomLevel, line_entry.m_ColorTheme != m_ColorTheme);
 				if (s_FigureCache.TryGetValue(figure_cache_id, out FigureCacheEntry figure_cache_entry))
 				{
-					AddAdornment(line_number, line_entry, figure_cache_entry);
+					AddFigure(line_number, line_entry, figure_cache_entry);
 				}
 				else
 				{
-					s_LineLoadQueue[new LineID(this, line_number)] = new FigureLoadQueueParams(figure_cache_id, line_entry.m_ColorTheme);
+					s_FigureLoadQueue.Add(new FigureLoadQueueEntry(this, figure_cache_id, line_entry.m_ColorTheme));
 				}
 			}
 
 			ProcessLineLoadQueue();
+			if (s_CacheCanHaveUnreferencedEntries)
+			{
+				StartTimer();
+			}
 #if TRACE
 			LeaveFunction();
 #endif
@@ -1243,32 +1292,21 @@ namespace EmbedFigure
 			s_Managers.Remove(this);
 		}
 
+#if HANDLE_FOCUS
 		private void OnGotFocus(object sender, S.EventArgs e)
 		{
 #if TRACE
 			EnterFunction();
 #endif
-			StopLoadingTimer();
+			StopTimer();
 
-			var line_ids_to_remove = new SCG.List<LineID>();
-			foreach (SCG.KeyValuePair<LineID, FigureLoadQueueParams> pair in s_LineLoadQueue)
-			{
-				LineID line_id = pair.Key;
-				if (this == line_id.m_Manager)
-				{
-					line_ids_to_remove.Add(line_id);
-				}
-			}
-			foreach (LineID line_id in line_ids_to_remove)
-			{
-				s_LineLoadQueue.Remove(line_id);
-			}
+			s_FigureLoadQueue.Clear();
 
-			foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineFigures)
+			foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineEntries)
 			{
 				LineEntry line_entry = pair.Value;
 				int line_number = pair.Key;
-				s_LineLoadQueue.Add(new LineID(this, line_number), new FigureLoadQueueParams(line_entry.m_FigureCacheID, line_entry.m_ColorTheme));
+				s_FigureLoadQueue.Add(new FigureLoadQueueEntry(this, line_entry.m_FigureCacheID, line_entry.m_ColorTheme));
 			}
 
 			ProcessLineLoadQueue();
@@ -1276,6 +1314,7 @@ namespace EmbedFigure
 			LeaveFunction();
 #endif
 		}
+#endif
 
 		/// <summary>
 		/// Handles whenever the text displayed in the view changes by adding the adornment to any reformatted lines
@@ -1294,22 +1333,202 @@ namespace EmbedFigure
 #if TRACE
 			EnterFunction();
 #endif
-			StopLoadingTimer();
+			StopTimer();
 
-			foreach (MVSTF.ITextViewLine line in e.NewOrReformattedLines)
+			MVST.ITextSnapshot text_snapshot = m_TextView.TextSnapshot;
+
+#if TRACE_LAYOUT_CHANGED
+			if (0 < e.NewOrReformattedLines.Count)
 			{
-				ProcessLine(line);
+				TraceMsg("--------");
+				TraceMsg("NewOrReformattedLines.Count: " + e.NewOrReformattedLines.Count);
+				TraceMsg("--------");
+				foreach (MVSTF.ITextViewLine line in e.NewOrReformattedLines)
+				{
+					int line_number = text_snapshot.GetLineNumberFromPosition(line.Start);
+					TraceMsg("Line " + line_number + " (" + line.Start.Position + "-" + line.End.Position + "): " + text_snapshot.GetText(line.Extent.Span));
+				}
 			}
 
-			// Remove figures from the last lines which were deleted.
-			if (e.OldSnapshot.LineCount > e.NewSnapshot.LineCount)
+			if (0 < e.TranslatedLines.Count)
 			{
-				RemoveFiguresFromLine(e.NewSnapshot.LineCount);
+				TraceMsg("--------");
+				TraceMsg("TranslatedLines.Count: " + e.TranslatedLines.Count);
+				TraceMsg("--------");
+				foreach (MVSTF.ITextViewLine line in e.TranslatedLines)
+				{
+					int line_number = text_snapshot.GetLineNumberFromPosition(line.Start);
+					TraceMsg("Line " + line_number + " (" + line.Start.Position + "-" + line.End.Position + "): " + text_snapshot.GetText(line.Extent.Span));
+				}
 			}
 
-			if (0 < s_LineLoadQueue.Count)
+			if (0 < e.NewOrReformattedSpans.Count)
 			{
-				StartLoadingTimer();
+				TraceMsg("--------");
+				TraceMsg("NewOrReformattedSpans.Count: " + e.NewOrReformattedSpans.Count);
+				TraceMsg("--------");
+				foreach (MVST.SnapshotSpan span in e.NewOrReformattedSpans)
+				{
+					int line_number = text_snapshot.GetLineNumberFromPosition(span.Start);
+					TraceMsg("Span " + line_number + " (" + span.Start.Position + "-" + span.End.Position + "): " + text_snapshot.GetText(span.Span));
+				}
+			}
+
+			if (0 < e.TranslatedSpans.Count)
+			{
+				TraceMsg("--------");
+				TraceMsg("TranslatedSpans.Count: " + e.TranslatedSpans.Count);
+				TraceMsg("--------");
+				foreach (MVST.SnapshotSpan span in e.TranslatedSpans)
+				{
+					int line_number = text_snapshot.GetLineNumberFromPosition(span.Start);
+					TraceMsg("Span " + line_number + " (" + span.Start.Position + "-" + span.End.Position + "): " + text_snapshot.GetText(span.Span));
+				}
+			}
+#endif
+
+			int first_line_number_to_add_adornment = int.MaxValue;
+			int last_line_number_to_add_adornment  = int.MinValue;
+			MVST.INormalizedTextChangeCollection changes = e.OldSnapshot.Version.Changes;
+			if (null == changes || !changes.IncludesLineChanges || 0 == m_LineEntries.Count)
+			{
+				foreach (MVSTF.ITextViewLine line in e.NewOrReformattedLines)
+				{
+					MVST.SnapshotSpan snapshot_span = line.Extent;
+					int line_number = text_snapshot.GetLineNumberFromPosition(line.Start);
+					first_line_number_to_add_adornment = S.Math.Min(first_line_number_to_add_adornment, line_number);
+					last_line_number_to_add_adornment  = S.Math.Max(last_line_number_to_add_adornment,  line_number);
+					ProcessLine(snapshot_span, text_snapshot.GetText(snapshot_span.Span), text_snapshot.GetLineNumberFromPosition(line.Start));
+				}
+			}
+			else
+			{
+#if DEBUG
+				TRC_SD.Debug.Assert(e.OldSnapshot.Version.Next == e.NewSnapshot.Version);
+#endif
+
+				MVST.ITextSnapshot old_text_snapshot = e.OldSnapshot;
+
+				// There could be more changes in a single line. Convert INormalizedTextChangeCollection changes to line based changes.
+				var change_ranges = new ChangeRanges[changes.Count];
+				int num_change_ranges = 0;
+				foreach (MVST.ITextChange change in changes)
+				{
+					int old_line_number = old_text_snapshot.GetLineNumberFromPosition(change.OldPosition);
+					int new_line_number = text_snapshot.GetLineNumberFromPosition(change.NewPosition);
+
+					if (0 < num_change_ranges && old_line_number == change_ranges[num_change_ranges-1].m_OldLastLineNumber)
+					{
+						--num_change_ranges;
+						change_ranges[num_change_ranges].m_LineCountDelta += change.LineCountDelta;
+					}
+					else
+					{
+						change_ranges[num_change_ranges].m_OldFirstLineNumber = old_line_number;
+						change_ranges[num_change_ranges].m_NewFirstLineNumber = new_line_number;
+						change_ranges[num_change_ranges].m_LineCountDelta = change.LineCountDelta;
+					}
+
+					for (;;)
+					{
+						++old_line_number;
+						old_text_snapshot.GetLineNumberFromPosition(old_line_number);
+						MVST.ITextSnapshotLine line = old_text_snapshot.GetLineFromLineNumber(old_line_number);
+						if (change.OldEnd <= line.Start)
+						{
+							change_ranges[num_change_ranges].m_OldLastLineNumber = old_line_number - 1;
+							break;
+						}
+					}
+
+					for (;;)
+					{
+						++new_line_number;
+						text_snapshot.GetLineNumberFromPosition(new_line_number);
+						MVST.ITextSnapshotLine line = text_snapshot.GetLineFromLineNumber(new_line_number);
+						if (change.NewEnd <= line.Start)
+						{
+							change_ranges[num_change_ranges].m_NewLastLineNumber = new_line_number - 1;
+							break;
+						}
+					}
+
+					++num_change_ranges;
+				}
+
+				var line_number_shifts = new LineNumberShift[m_LineEntries.Count];
+				int change_ranges_index = 0;
+				int num_line_number_shifts = 0;
+				int line_count_delta = 0;
+				foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineEntries)
+				{
+					int line_number = pair.Key;
+					LineEntry line_entry = pair.Value;
+
+					while (change_ranges_index < num_change_ranges && change_ranges[change_ranges_index].m_OldLastLineNumber < line_number)
+					{
+						line_count_delta += change_ranges[change_ranges_index].m_LineCountDelta;
+						++change_ranges_index;
+					}
+
+					if (change_ranges_index < num_change_ranges && change_ranges[change_ranges_index].m_OldFirstLineNumber <= line_number && line_number <= change_ranges[change_ranges_index].m_OldLastLineNumber)
+					{
+						if (0 > change_ranges[change_ranges_index].m_LineCountDelta)
+						{
+							if (line_number + change_ranges[change_ranges_index].m_LineCountDelta < change_ranges[change_ranges_index].m_OldFirstLineNumber)
+							{
+								line_number_shifts[num_line_number_shifts].m_OldLineNumber = line_number;
+								line_number_shifts[num_line_number_shifts].m_NewLineNumber = -1;
+								line_number_shifts[num_line_number_shifts].m_LineEntry = line_entry;
+								++num_line_number_shifts;
+								continue;
+							}
+						}
+					}
+
+					if (0 != line_count_delta)
+					{
+						line_number_shifts[num_line_number_shifts].m_OldLineNumber = line_number;
+						line_number_shifts[num_line_number_shifts].m_NewLineNumber = line_number + line_count_delta;
+						line_number_shifts[num_line_number_shifts].m_LineEntry = line_entry;
+						++num_line_number_shifts;
+					}
+				}
+
+				for (int i = 0; i < num_line_number_shifts; ++i)
+				{
+					RemoveAdornment(line_number_shifts[i].m_OldLineNumber, line_number_shifts[i].m_LineEntry);
+					m_LineEntries.Remove(line_number_shifts[i].m_OldLineNumber);
+				}
+
+				for (int i = 0; i < num_line_number_shifts; ++i)
+				{
+					if (0 < line_number_shifts[i].m_NewLineNumber)
+					{
+						m_LineEntries.Add(line_number_shifts[i].m_NewLineNumber, line_number_shifts[i].m_LineEntry);
+						ShiftFigureLineNumber(line_number_shifts[i]);
+					}
+					else
+					{
+						RemoveFigure(line_number_shifts[i].m_OldLineNumber, line_number_shifts[i].m_LineEntry);
+					}
+				}
+
+				for (int i = 0; i < num_change_ranges; ++i)
+				{
+					for (int line_number = change_ranges[i].m_NewFirstLineNumber;  line_number <= change_ranges[i].m_NewLastLineNumber; ++line_number)
+					{
+						MVST.ITextSnapshotLine new_change_line = text_snapshot.GetLineFromLineNumber(line_number);
+						ProcessLine(new_change_line.Extent, new_change_line.GetText(), line_number);
+					}
+				}
+			}
+
+			AddVisibleAdornments(first_line_number_to_add_adornment, last_line_number_to_add_adornment);
+
+			if (0 < s_FigureLoadQueue.Count || s_CacheCanHaveUnreferencedEntries)
+			{
+				StartTimer();
 			}
 #if TRACE
 			LeaveFunction();
@@ -1324,42 +1543,41 @@ namespace EmbedFigure
 #if TRACE
 			EnterFunction();
 #endif
-			StopLoadingTimer();
+			StopTimer();
 
-			var line_ids_to_remove = new SCG.List<LineID>();
-			foreach (SCG.KeyValuePair<LineID, FigureLoadQueueParams> pair in s_LineLoadQueue)
+			// Remove those lines from load queue, which are about to load with a different zoom level
+			var figure_load_entries_to_remove = new SCG.List<FigureLoadQueueEntry>();
+			foreach (FigureLoadQueueEntry figure_load_queue_entry in s_FigureLoadQueue)
 			{
-				LineID line_id = pair.Key;
-				FigureLoadQueueParams figure_load_queue_params = pair.Value;
-				if (this == line_id.m_Manager && figure_load_queue_params.m_FigureCacheID.m_ZoomLevel != m_TextView.ZoomLevel)
+				FigureCacheID figure_cache_id = figure_load_queue_entry.m_FigureCacheID;
+				if (this == figure_load_queue_entry.m_Manager && figure_cache_id.m_ZoomLevel != m_TextView.ZoomLevel)
 				{
-					line_ids_to_remove.Add(line_id);
+					figure_load_entries_to_remove.Add(figure_load_queue_entry);
 				}
 			}
-			foreach (LineID line_id in line_ids_to_remove)
+			foreach (FigureLoadQueueEntry figure_load_queue_entry in figure_load_entries_to_remove)
 			{
-				s_LineLoadQueue.Remove(line_id);
+				s_FigureLoadQueue.Remove(figure_load_queue_entry);
 			}
 
-			foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineFigures)
+			foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineEntries)
 			{
 				LineEntry line_entry = pair.Value;
 				int line_number = pair.Key;
-				RemoveFigure(line_entry, line_number);
-				FigureCacheID figure_cache_id = line_entry.m_FigureCacheID;
-				figure_cache_id.m_ZoomLevel = m_TextView.ZoomLevel;
+				RemoveFigure(line_number, line_entry);
+				var figure_cache_id = new FigureCacheID(line_entry.m_FigureCacheID.m_FigurePath, m_TextView.ZoomLevel, line_entry.m_FigureCacheID.m_Inverted);
 				if (s_FigureCache.TryGetValue(figure_cache_id, out FigureCacheEntry figure_cache_entry))
 				{
-					AddAdornment(line_number, line_entry, figure_cache_entry);
+					AddFigure(line_number, line_entry, figure_cache_entry);
 				}
 				else
 				{
-					s_LineLoadQueue[new LineID(this, line_number)] = new FigureLoadQueueParams(figure_cache_id, line_entry.m_ColorTheme);
+					s_FigureLoadQueue.Add(new FigureLoadQueueEntry(this, figure_cache_id, line_entry.m_ColorTheme));
 				}
 			}
-			if (0 < s_LineLoadQueue.Count)
+			if (0 < s_FigureLoadQueue.Count || s_CacheCanHaveUnreferencedEntries)
 			{
-				StartLoadingTimer();
+				StartTimer();
 			}
 #if TRACE
 			LeaveFunction();
@@ -1417,13 +1635,15 @@ namespace EmbedFigure
 #if TRACE
 			EmbedFigureManager.EnterFunction();
 #endif
-
+#if TRACE_LINE_TRANSFORM_LINE_NUMBERS
+			EmbedFigureManager.TraceMsg("Transform line number: " + m_Manager.m_TextView.TextSnapshot.GetLineNumberFromPosition(line.Start.Position));
+#endif
 			MVSTF.LineTransform clt = line.LineTransform;
 			MVSTF.LineTransform dlt = line.DefaultLineTransform;
 			int line_number = line.Snapshot.GetLineNumberFromPosition(line.Start);
 
 			double figure_height = 0.0;
-			if (m_Manager.m_LineFigures.TryGetValue(line_number, out LineEntry line_entry))
+			if (m_Manager.m_LineEntries.TryGetValue(line_number, out LineEntry line_entry))
 			{
 				if (null != line_entry.m_Figure)
 				{
