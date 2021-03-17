@@ -283,6 +283,10 @@ namespace EmbedFigure
 		// Static members
 		// ----------------------------------------------------------------
 
+		private const double brightness_red   = 0.299;
+		private const double brightness_green = 0.587;
+		private const double brightness_blue  = 0.114;
+
 		/// <summary>
 		/// Stores rendered figures for each path in <see cref="SWMI.BitmapImage">BitmapImages</see>
 		/// It's accessed only from Main thread
@@ -404,8 +408,9 @@ namespace EmbedFigure
 		{
 			if (brush is SWM.SolidColorBrush solid_color_brush)
 			{
-				float luminosity = 0.2126f * solid_color_brush.Color.ScR + 0.7152f * solid_color_brush.Color.ScG + 0.0722f * solid_color_brush.Color.ScB;
-				if (0.5 < luminosity)
+				SWM.Color color = solid_color_brush.Color;
+				double brightness = GetPerceivedBrightness(color.ScR, color.ScG, color.ScB);
+				if (0.5 < brightness)
 				{
 					return ColorTheme.Light;
 				}
@@ -415,6 +420,70 @@ namespace EmbedFigure
 				}
 			}
 			return ColorTheme.Unspecified;
+		}
+
+		private static double GetPerceivedBrightness(double r, double g, double b)
+		{
+			return S.Math.Sqrt(brightness_red * r*r + brightness_green * g*g + brightness_blue * b*b);
+		}
+
+		private static SD.Color InvertBrightness(SD.Color source_color)
+		{
+			double sr = source_color.R / 255.0;
+			double sg = source_color.G / 255.0;
+			double sb = source_color.B / 255.0;
+			double source_brightness = GetPerceivedBrightness(sr, sg, sb);
+			double target_brightness = 1.0 - source_brightness;
+			if (0.5 < source_brightness)
+			{
+				double scale = 255.0 * target_brightness / source_brightness;
+				return SD.Color.FromArgb(source_color.A, (int)(scale * sr), (int)(scale * sg), (int)(scale * sb));
+			}
+			else
+			{
+				double max_component = S.Math.Max(S.Math.Max(sr, sg), sb);
+				double mr;
+				double mg;
+				double mb;
+				double middle_brightness;
+				if (0.0 == max_component)
+				{
+					return SD.Color.FromArgb(source_color.A, 255, 255, 255);
+				}
+				if (1.0 > max_component)
+				{
+					double scale = 1 / max_component;
+					mr = scale * sr;
+					mg = scale * sg;
+					mb = scale * sb;
+					middle_brightness = GetPerceivedBrightness(mr, mg, mb);
+				}
+				else
+				{
+					mr = sr;
+					mg = sg;
+					mb = sb;
+					middle_brightness = source_brightness;
+				}
+
+				if (middle_brightness < target_brightness)
+				{
+					double a = brightness_red * (1.0 - mr) * (1.0 - mr) + brightness_green * (1.0 - mg) * (1.0 - mg) + brightness_blue * (1.0 - mb) * (1.0 - mb);
+					double b = 2.0 * brightness_red * mr * (1.0 - mr) + 2.0 * brightness_green * mg * (1.0 - mg) + 2.0 * brightness_blue * mb * (1.0 - mb);
+					double c = brightness_red * mr * mr + brightness_green * mg * mg + brightness_blue * mb * mb - target_brightness * target_brightness;
+					double d = b * b - 4 * a * c;
+					double t = (-b + S.Math.Sqrt(d)) / (2 * a);
+					double tr = (1 - t) * mr + t;
+					double tg = (1 - t) * mg + t;
+					double tb = (1 - t) * mb + t;
+					return SD.Color.FromArgb(source_color.A, (int)(255 * tr), (int)(255 * tg), (int)(255 * tb));
+				}
+				else
+				{
+					double scale = 255.0 * target_brightness / source_brightness;
+					return SD.Color.FromArgb(source_color.A, (int)(scale * sr), (int)(scale * sg), (int)(scale * sb));
+				}
+			}
 		}
 
 		private static void StartTimer()
@@ -471,9 +540,7 @@ namespace EmbedFigure
 					{
 						for (int y = 0; y < bitmap.Height; ++y)
 						{
-							SD.Color original_color = bitmap.GetPixel(x, y);
-							SD.Color new_color = SD.Color.FromArgb(original_color.A, 255 - original_color.R, 255 - original_color.G, 255 - original_color.B);
-							bitmap.SetPixel(x, y, new_color);
+							bitmap.SetPixel(x, y, InvertBrightness(bitmap.GetPixel(x, y)));
 						}
 					}
 				}
