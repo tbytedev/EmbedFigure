@@ -39,6 +39,7 @@ using SCG   = System.Collections.Generic;
 using SD    = System.Drawing;
 using SDI   = System.Drawing.Imaging;
 using SIO   = System.IO;
+using SRIS  = System.Runtime.InteropServices;
 using ST    = System.Timers;
 using STT   = System.Threading.Tasks;
 using SW    = System.Windows;
@@ -64,6 +65,14 @@ namespace EmbedFigure
 		Dark
 	}
 
+	internal enum FigureFormat
+	{
+		Unknown,
+		SVG,
+		TeX
+	}
+
+
 	internal struct ChangeRanges
 	{
 		internal int m_OldFirstLineNumber;
@@ -83,28 +92,15 @@ namespace EmbedFigure
 	/// <summary>
 	/// Contains the rendered figure, that is ready to add to the <see cref="MVSTE.IAdornmentLayer">IAdornmentLayer</see>
 	/// </summary>
-	internal class Figure : S.IDisposable
+	internal class Figure
 	{
-		internal readonly SWMI.BitmapImage m_BitmapImage;
+		internal readonly SWMI.BitmapSource m_BitmapSource;
 		internal readonly double m_Height;
 
-		private readonly SIO.MemoryStream m_MemoryStream;
-
-		internal Figure(SIO.MemoryStream memory_stream, double height)
+		internal Figure(SWMI.BitmapSource bitmap_source, double height)
 		{
-			// Load bitmap to System.Windows.Media.Imaging.BitmapImage from System.IO.MemoryStream
-			m_BitmapImage = new SWMI.BitmapImage();
-			m_BitmapImage.BeginInit();
-			m_BitmapImage.StreamSource = memory_stream;
-			m_BitmapImage.EndInit();
-
-			m_MemoryStream = memory_stream;
+			m_BitmapSource = bitmap_source;
 			m_Height = height;
-		}
-
-		public void Dispose()
-		{
-			m_MemoryStream.Dispose();
 		}
 	}
 
@@ -136,14 +132,16 @@ namespace EmbedFigure
 	internal class FigureCacheEntry
 	{
 		internal readonly string m_FigurePath;
+		internal readonly FigureFormat m_FigureFormat;
 		internal readonly double m_ZoomLevel;
 		internal readonly bool m_Inverted;
 
 		internal FigureCacheData m_FigureCacheData;
 
-		internal FigureCacheEntry(string figure_path, double zoom_level, bool inverted)
+		internal FigureCacheEntry(string figure_path, FigureFormat figure_format, double zoom_level, bool inverted)
 		{
 			m_FigurePath = figure_path;
+			m_FigureFormat = figure_format;
 			m_ZoomLevel = zoom_level;
 			m_Inverted = inverted;
 		}
@@ -163,9 +161,10 @@ namespace EmbedFigure
 		public override bool Equals(object obj)
 		{
 			return obj is FigureCacheEntry entry
-				&& m_FigurePath == entry.m_FigurePath
-				&& m_ZoomLevel  == entry.m_ZoomLevel
-				&& m_Inverted   == entry.m_Inverted;
+				&& m_FigurePath   == entry.m_FigurePath
+				&& m_FigureFormat == entry.m_FigureFormat
+				&& m_ZoomLevel    == entry.m_ZoomLevel
+				&& m_Inverted     == entry.m_Inverted;
 		}
 
 		/// <summary>
@@ -184,6 +183,7 @@ namespace EmbedFigure
 		{
 			int hashCode = 2138992742;
 			hashCode = hashCode * -1521134295 + SCG.EqualityComparer<string>.Default.GetHashCode(m_FigurePath);
+			hashCode = hashCode * -1521134295 + m_FigureFormat.GetHashCode();
 			hashCode = hashCode * -1521134295 + m_ZoomLevel.GetHashCode();
 			hashCode = hashCode * -1521134295 + m_Inverted.GetHashCode();
 			return hashCode;
@@ -235,6 +235,7 @@ namespace EmbedFigure
 		UnknownParameter,
 		ColorTheme,
 		SVGFile,
+		TeXFile,
 		ParameterValue
 	}
 
@@ -303,7 +304,8 @@ namespace EmbedFigure
 		private static readonly ParameterToken[] s_ParameterDefinitions =
 		{
 			new ParameterToken("ColorTheme", ParameterType.ColorTheme),
-			new ParameterToken("SVGFile", ParameterType.SVGFile)
+			new ParameterToken("SVGFile", ParameterType.SVGFile),
+			new ParameterToken("TeXFile", ParameterType.TeXFile)
 		};
 
 		/// <summary>
@@ -427,17 +429,20 @@ namespace EmbedFigure
 			return S.Math.Sqrt(brightness_red * r*r + brightness_green * g*g + brightness_blue * b*b);
 		}
 
-		private static SD.Color InvertBrightness(SD.Color source_color)
+		private static void InvertBrightness(ref byte red, ref byte green, ref byte blue)
 		{
-			double sr = source_color.R / 255.0;
-			double sg = source_color.G / 255.0;
-			double sb = source_color.B / 255.0;
+			double sr = red   / 255.0;
+			double sg = green / 255.0;
+			double sb = blue  / 255.0;
 			double source_brightness = GetPerceivedBrightness(sr, sg, sb);
 			double target_brightness = 1.0 - source_brightness;
 			if (0.5 < source_brightness)
 			{
 				double scale = 255.0 * target_brightness / source_brightness;
-				return SD.Color.FromArgb(source_color.A, (int)(scale * sr), (int)(scale * sg), (int)(scale * sb));
+				red   = (byte)(scale * sr);
+				green = (byte)(scale * sg);
+				blue  = (byte)(scale * sb);
+				return;
 			}
 			else
 			{
@@ -446,10 +451,13 @@ namespace EmbedFigure
 				double mg;
 				double mb;
 				double middle_brightness;
+
 				if (0.0 == max_component)
 				{
-					return SD.Color.FromArgb(source_color.A, 255, 255, 255);
+					red = green = blue = 255;
+					return;
 				}
+
 				if (1.0 > max_component)
 				{
 					double scale = 1 / max_component;
@@ -476,14 +484,23 @@ namespace EmbedFigure
 					double tr = (1 - t) * mr + t;
 					double tg = (1 - t) * mg + t;
 					double tb = (1 - t) * mb + t;
-					return SD.Color.FromArgb(source_color.A, (int)(255 * tr), (int)(255 * tg), (int)(255 * tb));
+					red   = (byte)(255.0 * tr);
+					green = (byte)(255.0 * tg);
+					blue  = (byte)(255.0 * tb);
 				}
 				else
 				{
 					double scale = 255.0 * target_brightness / source_brightness;
-					return SD.Color.FromArgb(source_color.A, (int)(scale * sr), (int)(scale * sg), (int)(scale * sb));
+					red   = (byte)(scale * sr);
+					green = (byte)(scale * sg);
+					blue  = (byte)(scale * sb);
 				}
 			}
+		}
+
+		private static S.Type GetStaticType<T>(T o)
+		{
+			return typeof(T);
 		}
 
 		private static void StartTimer()
@@ -520,41 +537,84 @@ namespace EmbedFigure
 #endif
 			var figure_cache_entry = (FigureCacheEntry)context;
 			SD.Bitmap bitmap = null;
-			SIO.MemoryStream memory_stream = null;
-			double height = 0.0;
+			byte[] pixels = null;
+			int bitmap_width = 0;
+			int bitmap_height = 0;
+			int bitmap_stride = 0;
+			double image_height = 0.0;
 			try
 			{
-				Svg.SvgDocument svg_doc = Svg.SvgDocument.Open(figure_cache_entry.m_FigurePath);
-				bitmap = svg_doc.Draw();
-				height = bitmap.Height;
-				if (100.0 != figure_cache_entry.m_ZoomLevel)
+				if (FigureFormat.SVG == figure_cache_entry.m_FigureFormat)
 				{
-					double zoom = figure_cache_entry.m_ZoomLevel / 100.0;
-					bitmap = svg_doc.Draw(S.Convert.ToInt32(bitmap.Width * zoom), S.Convert.ToInt32(bitmap.Height * zoom));
+					Svg.SvgDocument svg_doc = Svg.SvgDocument.Open(figure_cache_entry.m_FigurePath);
+					bitmap = svg_doc.Draw();
+					image_height = bitmap.Height;
+
+					// SVG library doesn't provide a way to retrieve the dimensions of the image before rendering.
+					// But we can render the image and get the dimensions of the Bitmap.
+					if (100.0 != figure_cache_entry.m_ZoomLevel)
+					{
+						// If zoom level is not 100%, render SVG file again in the resolution that matches the zoom level.
+						double zoom = figure_cache_entry.m_ZoomLevel / 100.0;
+						bitmap = svg_doc.Draw(S.Convert.ToInt32(bitmap.Width * zoom), S.Convert.ToInt32(bitmap.Height * zoom));
+					}
+
+					// Retrieve byte[] array that contains raw pixel data in BGRA format
+					SDI.BitmapData bitmap_data = bitmap.LockBits(new SD.Rectangle(0, 0, bitmap.Width, bitmap.Height), SDI.ImageLockMode.ReadOnly, SDI.PixelFormat.Format32bppArgb);
+
+					bitmap_width = bitmap_data.Width;
+					bitmap_height = bitmap_data.Height;
+					bitmap_stride = S.Math.Abs(bitmap_data.Stride);
+					int bitmap_size = bitmap_stride * bitmap_height;
+					pixels = new byte[bitmap_size];
+					SRIS.Marshal.Copy(bitmap_data.Scan0, pixels, 0, bitmap_size);
+					bitmap.UnlockBits(bitmap_data);
+				}
+				else if (FigureFormat.TeX == figure_cache_entry.m_FigureFormat)
+				{
+					// Read TeX file content
+					string tex_file_content = SIO.File.ReadAllText(figure_cache_entry.m_FigurePath);
+
+					// Parse TeX file
+					var parser = new WpfMath.TexFormulaParser();
+					WpfMath.TexFormula formula = parser.Parse(tex_file_content);
+
+					MVSS.ThreadHelper.JoinableTaskFactory.Run(async delegate
+					{
+						await MVSS.ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+						// UI related objects (System.Windows.Media.Imaging.BitmapSource) can be created and used only on Main thread
+						double zoom = 0.2 * figure_cache_entry.m_ZoomLevel;
+						WpfMath.TexRenderer renderer = formula.GetRenderer(WpfMath.TexStyle.Display, zoom, "Arial");
+						SWMI.BitmapSource bitmap_source = renderer.RenderToBitmap(0.0, 0.0);
+
+						bitmap_width = bitmap_source.PixelWidth;
+						bitmap_height = bitmap_source.PixelHeight;
+						bitmap_stride = bitmap_width * bitmap_source.Format.BitsPerPixel / 8;
+						image_height = 20.0 * bitmap_source.Height / zoom;
+						int bitmap_size = bitmap_stride * bitmap_height;
+						pixels = new byte[bitmap_size];
+						bitmap_source.CopyPixels(pixels, bitmap_stride, 0);
+					});
 				}
 
 				// Invert figure if needed
 				if (figure_cache_entry.m_Inverted)
 				{
-					for (int x = 0; x < bitmap.Width; ++x)
+					for (int y = 0; y < bitmap_height; ++y)
 					{
-						for (int y = 0; y < bitmap.Height; ++y)
+						int i = bitmap_stride * y;
+						for (int x = 0; x < bitmap_width; ++x, i += 4)
 						{
-							bitmap.SetPixel(x, y, InvertBrightness(bitmap.GetPixel(x, y)));
+							InvertBrightness(ref pixels[i+2], ref pixels[i+1], ref pixels[i]);
 						}
 					}
 				}
 
-				// Convert System.Drawing.Bitmap to System.Windows.Controls.Image, that can be added to m_AdornmentLayer
-				// Save System.Drawing.Bitmap to a System.IO.MemoryStream
-				memory_stream = new SIO.MemoryStream();
-				bitmap.Save(memory_stream, SDI.ImageFormat.Tiff);
-				memory_stream.Seek(0, SIO.SeekOrigin.Begin);
-
 #if TRACE
 				TraceMsg("Switch to Main LoadFigureTask");
 #endif
-				// UI related objects (System.Windows.Media.Imaging.BitmapImage) can be created and used only on Main thread
+				// UI related objects (System.Windows.Media.Imaging.BitmapSource) can be created and used only on Main thread
 				MVSS.ThreadHelper.JoinableTaskFactory.Run(async delegate
 				{
 					await MVSS.ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
@@ -565,12 +625,12 @@ namespace EmbedFigure
 					FigureCacheData figure_cache_data = figure_cache_entry.m_FigureCacheData;
 					if (0 == figure_cache_data.m_LineIDs.Count)
 					{
-						// This figure has been removed after the load process was started.
-						memory_stream.Dispose();
+						// This figure has been removed after the load task was started.
 						return;
 					}
 
-					figure_cache_data.m_Figure = new Figure(memory_stream, height);
+					SWMI.BitmapSource bitmap_source = SWMI.BitmapSource.Create(bitmap_width, bitmap_height, 96, 96, SWM.PixelFormats.Bgra32, null, pixels, bitmap_stride);
+					figure_cache_data.m_Figure = new Figure(bitmap_source, image_height);
 
 					foreach (LineID line_id in figure_cache_data.m_LineIDs)
 					{
@@ -598,7 +658,6 @@ namespace EmbedFigure
 #if TRACE
 			LeaveFunction();
 #endif
-			return;
 		}
 
 		private static void ProcessLineLoadQueue()
@@ -665,7 +724,6 @@ namespace EmbedFigure
 					}
 					line_entry.m_Figure = null;
 				}
-				figure_cache_data.m_Figure.Dispose();
 				figure_cache_data.m_Figure = null;
 				figure_cache_data.m_LastWriteTimeUtc = S.DateTime.MinValue;
 			}
@@ -780,7 +838,7 @@ namespace EmbedFigure
 			{
 				var image = new SWC.Image
 				{
-					Source = line_entry.m_Figure.m_BitmapImage,
+					Source = line_entry.m_Figure.m_BitmapSource,
 					Height = line_entry.m_Figure.m_Height
 				};
 
@@ -1043,9 +1101,10 @@ namespace EmbedFigure
 		/// Parse line. Search for #EmbedFigure instruction, and register figure changes.
 		/// </summary>
 		/// <param name="line">Line to add the adornments</param>
-		private void ParseLine(string line_string, out string out_figure_path, out ColorTheme out_color_tone)
+		private void ParseLine(string line_string, out string out_figure_path, out FigureFormat out_figure_format, out ColorTheme out_color_tone)
 		{
 			out_figure_path = null;
+			out_figure_format = FigureFormat.Unknown;
 			out_color_tone = ColorTheme.Unspecified;
 			int line_length = line_string.Length;
 
@@ -1113,6 +1172,7 @@ namespace EmbedFigure
 						switch (parameter_name)
 						{
 							case ParameterType.SVGFile:
+							case ParameterType.TeXFile:
 								if (null == local_path)
 								{
 									if (0 == token.m_RawText.Length)
@@ -1137,6 +1197,14 @@ namespace EmbedFigure
 									}
 
 									local_path = token.m_RawText;
+									if (ParameterType.SVGFile == parameter_name)
+									{
+										out_figure_format = FigureFormat.SVG;
+									}
+									else
+									{
+										out_figure_format = FigureFormat.TeX;
+									}
 								}
 							_invalid_local_path:
 								break;
@@ -1184,7 +1252,7 @@ namespace EmbedFigure
 		/// <param name="line">Line to add the adornments</param>
 		private void ProcessLine(MVST.SnapshotSpan snapshot_span, string line_text, int line_number)
 		{
-			ParseLine(line_text, out string figure_path, out ColorTheme color_theme);
+			ParseLine(line_text, out string figure_path, out FigureFormat figure_format, out ColorTheme color_theme);
 
 			var line_id = new LineID(this, line_number);
 
@@ -1216,7 +1284,7 @@ namespace EmbedFigure
 						// The current and the previous figures are different
 						RemoveFigure(line_number, line_entry);
 
-						FigureCacheEntry figure_cache_entry = new FigureCacheEntry(figure_path, zoom_level, inverted);
+						FigureCacheEntry figure_cache_entry = new FigureCacheEntry(figure_path, figure_format, zoom_level, inverted);
 
 						if (s_FigureCache.TryGetValue(figure_cache_entry, out FigureCacheEntry stored_figure_cache_entry))
 						{
@@ -1238,7 +1306,7 @@ namespace EmbedFigure
 				else
 				{
 					// There's a figure in this line and there was no figure in this line previously
-					FigureCacheEntry figure_cache_entry = new FigureCacheEntry(figure_path, zoom_level, inverted);
+					FigureCacheEntry figure_cache_entry = new FigureCacheEntry(figure_path, figure_format, zoom_level, inverted);
 					line_entry = new LineEntry(color_theme);
 					if (s_FigureCache.TryGetValue(figure_cache_entry, out FigureCacheEntry stored_figure_cache_entry))
 					{
@@ -1341,7 +1409,10 @@ namespace EmbedFigure
 
 				RemoveFigure(line_number, line_entry);
 				bool inverted = line_entry.m_ColorTheme != m_ColorTheme;
-				var figure_cache_entry = new FigureCacheEntry(line_entry.m_FigureCacheEntry.m_FigurePath, line_entry.m_FigureCacheEntry.m_ZoomLevel, inverted);
+				var figure_cache_entry = new FigureCacheEntry(line_entry.m_FigureCacheEntry.m_FigurePath,
+				                                              line_entry.m_FigureCacheEntry.m_FigureFormat,
+				                                              line_entry.m_FigureCacheEntry.m_ZoomLevel,
+				                                              inverted);
 				if (s_FigureCache.TryGetValue(figure_cache_entry, out FigureCacheEntry stored_figure_cache_entry))
 				{
 					line_entry.m_FigureCacheEntry = stored_figure_cache_entry;
@@ -1646,7 +1717,10 @@ namespace EmbedFigure
 				LineEntry line_entry = pair.Value;
 				int line_number = pair.Key;
 				RemoveFigure(line_number, line_entry);
-				var figure_cache_entry = new FigureCacheEntry(line_entry.m_FigureCacheEntry.m_FigurePath, m_TextView.ZoomLevel, line_entry.m_FigureCacheEntry.m_Inverted);
+				var figure_cache_entry = new FigureCacheEntry(line_entry.m_FigureCacheEntry.m_FigurePath,
+				                                              line_entry.m_FigureCacheEntry.m_FigureFormat,
+				                                              m_TextView.ZoomLevel,
+				                                              line_entry.m_FigureCacheEntry.m_Inverted);
 				if (s_FigureCache.TryGetValue(figure_cache_entry, out FigureCacheEntry stored_figure_cache_entry))
 				{
 					line_entry.m_FigureCacheEntry = stored_figure_cache_entry;
