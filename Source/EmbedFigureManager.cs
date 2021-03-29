@@ -65,11 +65,12 @@ namespace EmbedFigure
 		Dark
 	}
 
-	internal enum FigureFormat
+	internal enum FigureSourceType
 	{
 		Unknown,
-		SVG,
-		TeX
+		SVGFile,
+		TeXFile,
+		TexString
 	}
 
 
@@ -131,17 +132,17 @@ namespace EmbedFigure
 
 	internal class FigureCacheEntry
 	{
-		internal readonly string m_FigurePath;
-		internal readonly FigureFormat m_FigureFormat;
+		internal readonly string m_FigureSourceString;
+		internal readonly FigureSourceType m_FigureSourceType;
 		internal readonly double m_ZoomLevel;
 		internal readonly bool m_Inverted;
 
 		internal FigureCacheData m_FigureCacheData;
 
-		internal FigureCacheEntry(string figure_path, FigureFormat figure_format, double zoom_level, bool inverted)
+		internal FigureCacheEntry(string figure_source_string, FigureSourceType figure_source_type, double zoom_level, bool inverted)
 		{
-			m_FigurePath = figure_path;
-			m_FigureFormat = figure_format;
+			m_FigureSourceString = figure_source_string;
+			m_FigureSourceType = figure_source_type;
 			m_ZoomLevel = zoom_level;
 			m_Inverted = inverted;
 		}
@@ -161,10 +162,10 @@ namespace EmbedFigure
 		public override bool Equals(object obj)
 		{
 			return obj is FigureCacheEntry entry
-				&& m_FigurePath   == entry.m_FigurePath
-				&& m_FigureFormat == entry.m_FigureFormat
-				&& m_ZoomLevel    == entry.m_ZoomLevel
-				&& m_Inverted     == entry.m_Inverted;
+				&& m_FigureSourceString == entry.m_FigureSourceString
+				&& m_FigureSourceType   == entry.m_FigureSourceType
+				&& m_ZoomLevel          == entry.m_ZoomLevel
+				&& m_Inverted           == entry.m_Inverted;
 		}
 
 		/// <summary>
@@ -182,8 +183,8 @@ namespace EmbedFigure
 		public override int GetHashCode()
 		{
 			int hashCode = 2138992742;
-			hashCode = hashCode * -1521134295 + SCG.EqualityComparer<string>.Default.GetHashCode(m_FigurePath);
-			hashCode = hashCode * -1521134295 + m_FigureFormat.GetHashCode();
+			hashCode = hashCode * -1521134295 + SCG.EqualityComparer<string>.Default.GetHashCode(m_FigureSourceString);
+			hashCode = hashCode * -1521134295 + m_FigureSourceType.GetHashCode();
 			hashCode = hashCode * -1521134295 + m_ZoomLevel.GetHashCode();
 			hashCode = hashCode * -1521134295 + m_Inverted.GetHashCode();
 			return hashCode;
@@ -191,13 +192,13 @@ namespace EmbedFigure
 
 	}
 
-	internal readonly struct FigureLoadQueueEntry
+	internal readonly struct FigureRenderQueueEntry
 	{
 		internal readonly EmbedFigureManager m_Manager;
 		internal readonly FigureCacheEntry m_FigureCacheEntry;
 		internal readonly ColorTheme m_ColorTheme;
 
-		internal FigureLoadQueueEntry(EmbedFigureManager manager, FigureCacheEntry figure_cache_entry, ColorTheme color_tone)
+		internal FigureRenderQueueEntry(EmbedFigureManager manager, FigureCacheEntry figure_cache_entry, ColorTheme color_tone)
 		{
 			m_Manager = manager;
 			m_FigureCacheEntry = figure_cache_entry;
@@ -236,6 +237,7 @@ namespace EmbedFigure
 		ColorTheme,
 		SVGFile,
 		TeXFile,
+		TeXString,
 		ParameterValue
 	}
 
@@ -304,8 +306,9 @@ namespace EmbedFigure
 		private static readonly ParameterToken[] s_ParameterDefinitions =
 		{
 			new ParameterToken("ColorTheme", ParameterType.ColorTheme),
-			new ParameterToken("SVGFile", ParameterType.SVGFile),
-			new ParameterToken("TeXFile", ParameterType.TeXFile)
+			new ParameterToken("SVGFile",    ParameterType.SVGFile),
+			new ParameterToken("TeXFile",    ParameterType.TeXFile),
+			new ParameterToken("TeXString",  ParameterType.TeXString)
 		};
 
 		/// <summary>
@@ -314,19 +317,19 @@ namespace EmbedFigure
 		private static readonly char[] s_InvalidChars;
 
 		/// <summary>
-		/// This timer is fired after the user hasn't changed the text for 1500 ms and there are files to load, or the cache can be cleaned up.
+		/// This timer is fired after the user hasn't changed the text for 1500 ms and there are figures to render, or the cache can be cleaned up.
 		/// </summary>
 		/// <remarks>
 		/// Do not load and render figures at once while user is still typing, rather wait some time to let things settle down a bit.
-		/// Load is commenced when this timer is elapsed.
+		/// Rendering is commenced when this timer is elapsed.
 		/// </remarks>
 		private static readonly ST.Timer s_Timer = new ST.Timer(1500);
 
 		/// <summary>
-		/// Stores the figures to load and the lines to refresh
+		/// Stores the figures to render and the lines to refresh
 		/// It's accessed only from Main thread
 		/// </summary>
-		private static readonly SCG.HashSet<FigureLoadQueueEntry> s_FigureLoadQueue = new SCG.HashSet<FigureLoadQueueEntry>();
+		private static readonly SCG.HashSet<FigureRenderQueueEntry> s_FigureRenderQueue = new SCG.HashSet<FigureRenderQueueEntry>();
 
 #if HANDLE_FOCUS
 		private static readonly MVSSI.IVsShell s_VSShell;
@@ -394,7 +397,7 @@ namespace EmbedFigure
 				if (0 == figure_cache_data.m_LineIDs.Count)
 				{
 					cache_entries_to_remove.Add(figure_cache_entry);
-					UnloadFigure(figure_cache_data);
+					InvalidateCache(figure_cache_data);
 				}
 			}
 
@@ -498,11 +501,6 @@ namespace EmbedFigure
 			}
 		}
 
-		private static S.Type GetStaticType<T>(T o)
-		{
-			return typeof(T);
-		}
-
 		private static void StartTimer()
 		{
 			// Capture current value of s_TimerStartID to be used in event handler lambda expression.
@@ -530,7 +528,7 @@ namespace EmbedFigure
 			}
 		}
 
-		public static void LoadFigureTask(object context)
+		public static void RenderFigureTask(object context)
 		{
 #if TRACE
 			EnterFunction();
@@ -544,9 +542,9 @@ namespace EmbedFigure
 			double image_height = 0.0;
 			try
 			{
-				if (FigureFormat.SVG == figure_cache_entry.m_FigureFormat)
+				if (FigureSourceType.SVGFile == figure_cache_entry.m_FigureSourceType)
 				{
-					Svg.SvgDocument svg_doc = Svg.SvgDocument.Open(figure_cache_entry.m_FigurePath);
+					Svg.SvgDocument svg_doc = Svg.SvgDocument.Open(figure_cache_entry.m_FigureSourceString);
 					bitmap = svg_doc.Draw();
 					image_height = bitmap.Height;
 
@@ -570,10 +568,18 @@ namespace EmbedFigure
 					SRIS.Marshal.Copy(bitmap_data.Scan0, pixels, 0, bitmap_size);
 					bitmap.UnlockBits(bitmap_data);
 				}
-				else if (FigureFormat.TeX == figure_cache_entry.m_FigureFormat)
+				else
 				{
-					// Read TeX file content
-					string tex_file_content = SIO.File.ReadAllText(figure_cache_entry.m_FigurePath);
+					string tex_file_content = null;
+					if (FigureSourceType.TexString == figure_cache_entry.m_FigureSourceType)
+					{
+						tex_file_content = figure_cache_entry.m_FigureSourceString;
+					}
+					else if (FigureSourceType.TeXFile == figure_cache_entry.m_FigureSourceType)
+					{
+						// Read TeX file content
+						tex_file_content = SIO.File.ReadAllText(figure_cache_entry.m_FigureSourceString);
+					}
 
 					// Parse TeX file
 					var parser = new WpfMath.TexFormulaParser();
@@ -612,7 +618,7 @@ namespace EmbedFigure
 				}
 
 #if TRACE
-				TraceMsg("Switch to Main LoadFigureTask");
+				TraceMsg("Switch to Main RenderFigureTask");
 #endif
 				// UI related objects (System.Windows.Media.Imaging.BitmapSource) can be created and used only on Main thread
 				MVSS.ThreadHelper.JoinableTaskFactory.Run(async delegate
@@ -620,12 +626,12 @@ namespace EmbedFigure
 					await MVSS.ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
 
 #if TRACE
-					TraceMsg("Switched to Main LoadFigureTask");
+					TraceMsg("Switched to Main RenderFigureTask");
 #endif
 					FigureCacheData figure_cache_data = figure_cache_entry.m_FigureCacheData;
 					if (0 == figure_cache_data.m_LineIDs.Count)
 					{
-						// This figure has been removed after the load task was started.
+						// This figure has been removed after the render task was started.
 						return;
 					}
 
@@ -641,7 +647,7 @@ namespace EmbedFigure
 						manager.AddFigure(line_number, line_entry, figure_cache_data);
 					}
 #if TRACE
-					TraceMsg("Switch from Main LoadFigureTask");
+					TraceMsg("Switch from Main RenderFigureTask");
 #endif
 				});
 			}
@@ -650,7 +656,7 @@ namespace EmbedFigure
 			finally
 			{
 #if TRACE
-				TraceMsg("Switched from Main LoadFigureTask");
+				TraceMsg("Switched from Main RenderFigureTask");
 #endif
 				bitmap?.Dispose();
 			}
@@ -660,13 +666,13 @@ namespace EmbedFigure
 #endif
 		}
 
-		private static void ProcessLineLoadQueue()
+		private static void ProcessLineRenderQueue()
 		{
-			// Create a list of lines for each figure. It's possible that more than one lines are waiting for the same figure to be loaded.
-			var figure_load_queue = new SCG.Dictionary<FigureCacheEntry, SCG.HashSet<LineID>>();
-			foreach (FigureLoadQueueEntry figure_load_queue_entry in s_FigureLoadQueue)
+			// Create a list of lines for each figure. It's possible that more than one lines are waiting for the same figure to be rendered.
+			var figure_render_queue = new SCG.Dictionary<FigureCacheEntry, SCG.HashSet<LineID>>();
+			foreach (FigureRenderQueueEntry figure_render_queue_entry in s_FigureRenderQueue)
 			{
-				FigureCacheEntry figure_cache_entry = figure_load_queue_entry.m_FigureCacheEntry;
+				FigureCacheEntry figure_cache_entry = figure_render_queue_entry.m_FigureCacheEntry;
 				FigureCacheData figure_cache_data = figure_cache_entry.m_FigureCacheData;
 
 				// Check if there are still lines referring to this cache entry
@@ -675,41 +681,52 @@ namespace EmbedFigure
 					continue;
 				}
 
-				// Check if update is necessary
-				if (figure_cache_data.m_UpdateID == s_UpdateID)
+				// Check if figure source is a string
+				if (FigureSourceType.TexString == figure_cache_entry.m_FigureSourceType)
 				{
-					continue;
+					// Check if this figure is already rendered
+					if (null != figure_cache_data.m_Figure)
+					{
+						continue;
+					}
+				}
+				else
+				{
+					// Check if update is necessary
+					if (figure_cache_data.m_UpdateID == s_UpdateID)
+					{
+						continue;
+					}
+
+					figure_cache_data.m_UpdateID = s_UpdateID;
+
+					var file_info = new SIO.FileInfo(figure_cache_entry.m_FigureSourceString);
+
+					if (!file_info.Exists)
+					{
+						// This figure has been deleted.
+						InvalidateCache(figure_cache_data);
+						continue;
+					}
+					if (file_info.LastWriteTimeUtc == figure_cache_data.m_LastWriteTimeUtc)
+					{
+						continue;
+					}
+					InvalidateCache(figure_cache_data);
+					figure_cache_data.m_LastWriteTimeUtc = file_info.LastWriteTimeUtc;
 				}
 
-				figure_cache_data.m_UpdateID = s_UpdateID;
-
-				var file_info = new SIO.FileInfo(figure_cache_entry.m_FigurePath);
-
-				if (!file_info.Exists)
-				{
-					// This figure has been deleted.
-					UnloadFigure(figure_cache_data);
-					continue;
-				}
-				if (file_info.LastWriteTimeUtc == figure_cache_data.m_LastWriteTimeUtc)
-				{
-					continue;
-				}
-
-				UnloadFigure(figure_cache_data);
-				figure_cache_data.m_LastWriteTimeUtc = file_info.LastWriteTimeUtc;
-
-				var task = new STT.Task(LoadFigureTask, figure_load_queue_entry.m_FigureCacheEntry);
+				var task = new STT.Task(RenderFigureTask, figure_render_queue_entry.m_FigureCacheEntry);
 				task.Start();
 				// Although System.Threading.Tasks.Task is IDisposable, it's not necessary to call its Dispose() function.
 				// https://devblogs.microsoft.com/pfxteam/do-i-need-to-dispose-of-tasks/
 			}
 
-			s_FigureLoadQueue.Clear();
+			s_FigureRenderQueue.Clear();
 
 		}
 
-		private static void UnloadFigure(FigureCacheData figure_cache_data)
+		private static void InvalidateCache(FigureCacheData figure_cache_data)
 		{
 			if (null != figure_cache_data.m_Figure)
 			{
@@ -730,7 +747,7 @@ namespace EmbedFigure
 		}
 
 		/// <summary>
-		/// This timer is fired after the user hasn't changed the text for 1500 ms and there are files to load.
+		/// This timer is fired after the user hasn't changed the text for 1500 ms and there are figures to render.
 		/// </summary>
 		/// <remarks>This function is called by the framework on a Worker Thread</remarks>
 		private static void TimerElapsed(int timer_start_id)
@@ -750,7 +767,7 @@ namespace EmbedFigure
 #if TRACE
 				TraceMsg("Switched to Main TimerElapsed");
 #endif
-				ProcessLineLoadQueue();
+				ProcessLineRenderQueue();
 				CacheCleanup();
 #if TRACE
 				TraceMsg("Switch from Main TimerElapsed");
@@ -1101,10 +1118,10 @@ namespace EmbedFigure
 		/// Parse line. Search for #EmbedFigure instruction, and register figure changes.
 		/// </summary>
 		/// <param name="line">Line to add the adornments</param>
-		private void ParseLine(string line_string, out string out_figure_path, out FigureFormat out_figure_format, out ColorTheme out_color_tone)
+		private void ParseLine(string line_string, out string out_figure_source_string, out FigureSourceType out_figure_source_type, out ColorTheme out_color_tone)
 		{
-			out_figure_path = null;
-			out_figure_format = FigureFormat.Unknown;
+			out_figure_source_string = null;
+			out_figure_source_type = FigureSourceType.Unknown;
 			out_color_tone = ColorTheme.Unspecified;
 			int line_length = line_string.Length;
 
@@ -1163,7 +1180,7 @@ namespace EmbedFigure
 
 				ParameterType parameter_name = ParameterType.UnknownParameter;
 
-				string local_path = null;
+				bool figure_source_specified = false;
 
 				foreach (ParameterToken token in tokens)
 				{
@@ -1173,8 +1190,9 @@ namespace EmbedFigure
 						{
 							case ParameterType.SVGFile:
 							case ParameterType.TeXFile:
-								if (null == local_path)
+								if (!figure_source_specified)
 								{
+									figure_source_specified = true;
 									if (0 == token.m_RawText.Length)
 									{
 										break;
@@ -1196,17 +1214,34 @@ namespace EmbedFigure
 										break;
 									}
 
-									local_path = token.m_RawText;
+									string local_path = token.m_RawText;
+									// TODO: Check if file system is case sensitive.
+									// For now we're assuming that it's a windows file system, so it's case insensitive.
+									// Convert filename to lowercase to ignore character case.
+									local_path = local_path.ToLowerInvariant();
+									local_path = local_path.Replace(SIO.Path.AltDirectorySeparatorChar, SIO.Path.DirectorySeparatorChar);
+
+									// TODO: Support for full path and other rooted path types
+									out_figure_source_string = SIO.Path.GetDirectoryName(m_TextDocument.FilePath) + SIO.Path.DirectorySeparatorChar + local_path;
+
 									if (ParameterType.SVGFile == parameter_name)
 									{
-										out_figure_format = FigureFormat.SVG;
+										out_figure_source_type = FigureSourceType.SVGFile;
 									}
 									else
 									{
-										out_figure_format = FigureFormat.TeX;
+										out_figure_source_type = FigureSourceType.TeXFile;
 									}
 								}
 							_invalid_local_path:
+								break;
+							case ParameterType.TeXString:
+								if (!figure_source_specified)
+								{
+									figure_source_specified = true;
+									out_figure_source_string = token.m_RawText;
+									out_figure_source_type = FigureSourceType.TexString;
+								}
 								break;
 							case ParameterType.ColorTheme:
 								if (ColorTheme.Unspecified == out_color_tone)
@@ -1229,19 +1264,6 @@ namespace EmbedFigure
 						parameter_name = token.m_Type;
 					}
 				}
-
-				if (null == local_path)
-				{
-					return;
-				}
-				// TODO: Check if file system is case sensitive.
-				// For now we're assuming that it's a windows file system, so it's case insensitive.
-				// Convert filename to lowercase to ignore character case.
-				local_path = local_path.ToLowerInvariant();
-				local_path = local_path.Replace(SIO.Path.AltDirectorySeparatorChar, SIO.Path.DirectorySeparatorChar);
-
-				// TODO: Support for full path and other rooted path types
-				out_figure_path = SIO.Path.GetDirectoryName(m_TextDocument.FilePath) + SIO.Path.DirectorySeparatorChar + local_path;
 				return;
 			}
 		}
@@ -1252,11 +1274,11 @@ namespace EmbedFigure
 		/// <param name="line">Line to add the adornments</param>
 		private void ProcessLine(MVST.SnapshotSpan snapshot_span, string line_text, int line_number)
 		{
-			ParseLine(line_text, out string figure_path, out FigureFormat figure_format, out ColorTheme color_theme);
+			ParseLine(line_text, out string figure_source_string, out FigureSourceType figure_source_type, out ColorTheme color_theme);
 
 			var line_id = new LineID(this, line_number);
 
-			if (null == figure_path)
+			if (null == figure_source_string)
 			{
 				// Currently there's no figure specified in this line
 				if (m_LineEntries.TryGetValue(line_number, out LineEntry old_line_entry))
@@ -1277,18 +1299,19 @@ namespace EmbedFigure
 					// There's a figure in this line now but there was already a figure in this line
 					line_entry.m_ColorTheme = color_theme;
 
-					if (line_entry.m_FigureCacheEntry.m_FigurePath != figure_path ||
-						line_entry.m_FigureCacheEntry.m_Inverted   != inverted ||
-						line_entry.m_FigureCacheEntry.m_ZoomLevel  != zoom_level)
+					if (line_entry.m_FigureCacheEntry.m_FigureSourceString != figure_source_string ||
+						line_entry.m_FigureCacheEntry.m_FigureSourceType   != figure_source_type ||
+						line_entry.m_FigureCacheEntry.m_Inverted           != inverted ||
+						line_entry.m_FigureCacheEntry.m_ZoomLevel          != zoom_level)
 					{
 						// The current and the previous figures are different
 						RemoveFigure(line_number, line_entry);
 
-						FigureCacheEntry figure_cache_entry = new FigureCacheEntry(figure_path, figure_format, zoom_level, inverted);
+						FigureCacheEntry figure_cache_entry = new FigureCacheEntry(figure_source_string, figure_source_type, zoom_level, inverted);
 
 						if (s_FigureCache.TryGetValue(figure_cache_entry, out FigureCacheEntry stored_figure_cache_entry))
 						{
-							// This figure is already loaded, so just use it.
+							// This figure is already rendered, so just use it.
 							line_entry.m_FigureCacheEntry = stored_figure_cache_entry;
 							FigureCacheData figure_cache_data = stored_figure_cache_entry.m_FigureCacheData;
 							figure_cache_data.AddLineID(line_id);
@@ -1299,14 +1322,14 @@ namespace EmbedFigure
 							line_entry.m_FigureCacheEntry = figure_cache_entry;
 							figure_cache_entry.m_FigureCacheData = new FigureCacheData(line_id);
 							s_FigureCache.Add(figure_cache_entry);
-							s_FigureLoadQueue.Add(new FigureLoadQueueEntry(this, figure_cache_entry, color_theme));
+							s_FigureRenderQueue.Add(new FigureRenderQueueEntry(this, figure_cache_entry, color_theme));
 						}
 					}
 				}
 				else
 				{
 					// There's a figure in this line and there was no figure in this line previously
-					FigureCacheEntry figure_cache_entry = new FigureCacheEntry(figure_path, figure_format, zoom_level, inverted);
+					FigureCacheEntry figure_cache_entry = new FigureCacheEntry(figure_source_string, figure_source_type, zoom_level, inverted);
 					line_entry = new LineEntry(color_theme);
 					if (s_FigureCache.TryGetValue(figure_cache_entry, out FigureCacheEntry stored_figure_cache_entry))
 					{
@@ -1320,7 +1343,7 @@ namespace EmbedFigure
 						line_entry.m_FigureCacheEntry = figure_cache_entry;
 						figure_cache_entry.m_FigureCacheData = new FigureCacheData(line_id);
 						s_FigureCache.Add(figure_cache_entry);
-						s_FigureLoadQueue.Add(new FigureLoadQueueEntry(this, figure_cache_entry, color_theme));
+						s_FigureRenderQueue.Add(new FigureRenderQueueEntry(this, figure_cache_entry, color_theme));
 					}
 					m_LineEntries.Add(line_number, line_entry);
 				}
@@ -1380,21 +1403,21 @@ namespace EmbedFigure
 
 			StopTimer();
 
-			// Remove those lines from load queue, which are about to load with a different invert value
-			var figure_load_entries_to_remove = new SCG.List<FigureLoadQueueEntry>();
-			foreach (FigureLoadQueueEntry figure_load_queue_entry in s_FigureLoadQueue)
+			// Remove those lines from render queue, which are about to render with a different invert value
+			var figure_render_entries_to_remove = new SCG.List<FigureRenderQueueEntry>();
+			foreach (FigureRenderQueueEntry figure_render_queue_entry in s_FigureRenderQueue)
 			{
-				FigureCacheEntry figure_cache_entry = figure_load_queue_entry.m_FigureCacheEntry;
-				ColorTheme load_entry_color_theme = figure_load_queue_entry.m_ColorTheme;
-				bool inverted = ColorTheme.Unspecified != load_entry_color_theme && load_entry_color_theme != m_ColorTheme;
-				if (this == figure_load_queue_entry.m_Manager && figure_cache_entry.m_Inverted != inverted)
+				FigureCacheEntry figure_cache_entry = figure_render_queue_entry.m_FigureCacheEntry;
+				ColorTheme render_entry_color_theme = figure_render_queue_entry.m_ColorTheme;
+				bool inverted = ColorTheme.Unspecified != render_entry_color_theme && render_entry_color_theme != m_ColorTheme;
+				if (this == figure_render_queue_entry.m_Manager && figure_cache_entry.m_Inverted != inverted)
 				{
-					figure_load_entries_to_remove.Add(figure_load_queue_entry);
+					figure_render_entries_to_remove.Add(figure_render_queue_entry);
 				}
 			}
-			foreach (FigureLoadQueueEntry figure_load_queue_entry in figure_load_entries_to_remove)
+			foreach (FigureRenderQueueEntry figure_render_queue_entry in figure_render_entries_to_remove)
 			{
-				s_FigureLoadQueue.Remove(figure_load_queue_entry);
+				s_FigureRenderQueue.Remove(figure_render_queue_entry);
 			}
 
 			foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineEntries)
@@ -1409,8 +1432,8 @@ namespace EmbedFigure
 
 				RemoveFigure(line_number, line_entry);
 				bool inverted = line_entry.m_ColorTheme != m_ColorTheme;
-				var figure_cache_entry = new FigureCacheEntry(line_entry.m_FigureCacheEntry.m_FigurePath,
-				                                              line_entry.m_FigureCacheEntry.m_FigureFormat,
+				var figure_cache_entry = new FigureCacheEntry(line_entry.m_FigureCacheEntry.m_FigureSourceString,
+				                                              line_entry.m_FigureCacheEntry.m_FigureSourceType,
 				                                              line_entry.m_FigureCacheEntry.m_ZoomLevel,
 				                                              inverted);
 				if (s_FigureCache.TryGetValue(figure_cache_entry, out FigureCacheEntry stored_figure_cache_entry))
@@ -1425,11 +1448,11 @@ namespace EmbedFigure
 					line_entry.m_FigureCacheEntry = figure_cache_entry;
 					figure_cache_entry.m_FigureCacheData = new FigureCacheData(new LineID(this, line_number));
 					s_FigureCache.Add(figure_cache_entry);
-					s_FigureLoadQueue.Add(new FigureLoadQueueEntry(this, figure_cache_entry, line_entry.m_ColorTheme));
+					s_FigureRenderQueue.Add(new FigureRenderQueueEntry(this, figure_cache_entry, line_entry.m_ColorTheme));
 				}
 			}
 
-			ProcessLineLoadQueue();
+			ProcessLineRenderQueue();
 			if (s_CacheCanHaveUnreferencedEntries)
 			{
 				StartTimer();
@@ -1453,16 +1476,16 @@ namespace EmbedFigure
 #endif
 			StopTimer();
 
-			s_FigureLoadQueue.Clear();
+			s_FigureRenderQueue.Clear();
 
 			foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineEntries)
 			{
 				LineEntry line_entry = pair.Value;
 				int line_number = pair.Key;
-				s_FigureLoadQueue.Add(new FigureLoadQueueEntry(this, line_entry.m_FigureCacheEntry, line_entry.m_ColorTheme));
+				s_FigureRenderQueue.Add(new FigureRenderQueueEntry(this, line_entry.m_FigureCacheEntry, line_entry.m_ColorTheme));
 			}
 
-			ProcessLineLoadQueue();
+			ProcessLineRenderQueue();
 #if TRACE
 			LeaveFunction();
 #endif
@@ -1679,7 +1702,7 @@ namespace EmbedFigure
 
 			AddVisibleAdornments(first_line_number_to_add_adornment, last_line_number_to_add_adornment);
 
-			if (0 < s_FigureLoadQueue.Count || s_CacheCanHaveUnreferencedEntries)
+			if (0 < s_FigureRenderQueue.Count || s_CacheCanHaveUnreferencedEntries)
 			{
 				StartTimer();
 			}
@@ -1697,19 +1720,19 @@ namespace EmbedFigure
 #endif
 			StopTimer();
 
-			// Remove those lines from load queue, which are about to load with a different zoom level
-			var figure_load_entries_to_remove = new SCG.List<FigureLoadQueueEntry>();
-			foreach (FigureLoadQueueEntry figure_load_queue_entry in s_FigureLoadQueue)
+			// Remove those lines from render queue, which are about to render with a different zoom level
+			var figure_render_entries_to_remove = new SCG.List<FigureRenderQueueEntry>();
+			foreach (FigureRenderQueueEntry figure_render_queue_entry in s_FigureRenderQueue)
 			{
-				FigureCacheEntry figure_cache_entry = figure_load_queue_entry.m_FigureCacheEntry;
-				if (this == figure_load_queue_entry.m_Manager && figure_cache_entry.m_ZoomLevel != m_TextView.ZoomLevel)
+				FigureCacheEntry figure_cache_entry = figure_render_queue_entry.m_FigureCacheEntry;
+				if (this == figure_render_queue_entry.m_Manager && figure_cache_entry.m_ZoomLevel != m_TextView.ZoomLevel)
 				{
-					figure_load_entries_to_remove.Add(figure_load_queue_entry);
+					figure_render_entries_to_remove.Add(figure_render_queue_entry);
 				}
 			}
-			foreach (FigureLoadQueueEntry figure_load_queue_entry in figure_load_entries_to_remove)
+			foreach (FigureRenderQueueEntry figure_render_queue_entry in figure_render_entries_to_remove)
 			{
-				s_FigureLoadQueue.Remove(figure_load_queue_entry);
+				s_FigureRenderQueue.Remove(figure_render_queue_entry);
 			}
 
 			foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineEntries)
@@ -1717,8 +1740,8 @@ namespace EmbedFigure
 				LineEntry line_entry = pair.Value;
 				int line_number = pair.Key;
 				RemoveFigure(line_number, line_entry);
-				var figure_cache_entry = new FigureCacheEntry(line_entry.m_FigureCacheEntry.m_FigurePath,
-				                                              line_entry.m_FigureCacheEntry.m_FigureFormat,
+				var figure_cache_entry = new FigureCacheEntry(line_entry.m_FigureCacheEntry.m_FigureSourceString,
+				                                              line_entry.m_FigureCacheEntry.m_FigureSourceType,
 				                                              m_TextView.ZoomLevel,
 				                                              line_entry.m_FigureCacheEntry.m_Inverted);
 				if (s_FigureCache.TryGetValue(figure_cache_entry, out FigureCacheEntry stored_figure_cache_entry))
@@ -1732,11 +1755,11 @@ namespace EmbedFigure
 				{
 					figure_cache_entry.m_FigureCacheData = new FigureCacheData(new LineID(this, line_number));
 					s_FigureCache.Add(figure_cache_entry);
-					s_FigureLoadQueue.Add(new FigureLoadQueueEntry(this, figure_cache_entry, line_entry.m_ColorTheme));
+					s_FigureRenderQueue.Add(new FigureRenderQueueEntry(this, figure_cache_entry, line_entry.m_ColorTheme));
 					line_entry.m_FigureCacheEntry = figure_cache_entry;
 				}
 			}
-			if (0 < s_FigureLoadQueue.Count || s_CacheCanHaveUnreferencedEntries)
+			if (0 < s_FigureRenderQueue.Count || s_CacheCanHaveUnreferencedEntries)
 			{
 				StartTimer();
 			}
