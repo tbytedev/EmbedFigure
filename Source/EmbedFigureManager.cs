@@ -37,6 +37,7 @@ using MVSTF = Microsoft.VisualStudio.Text.Formatting;
 using S     = System;
 using SCG   = System.Collections.Generic;
 using SD    = System.Drawing;
+using SDD2D = System.Drawing.Drawing2D;
 using SDI   = System.Drawing.Imaging;
 using SIO   = System.IO;
 using SRIS  = System.Runtime.InteropServices;
@@ -68,6 +69,7 @@ namespace EmbedFigure
 	internal enum FigureSourceType
 	{
 		Unknown,
+		ImageFile,
 		SVGFile,
 		TeXFile,
 		TexString
@@ -235,6 +237,7 @@ namespace EmbedFigure
 	{
 		UnknownParameter,
 		ColorTheme,
+		ImageFile,
 		SVGFile,
 		TeXFile,
 		TeXString,
@@ -306,6 +309,7 @@ namespace EmbedFigure
 		private static readonly ParameterToken[] s_ParameterDefinitions =
 		{
 			new ParameterToken("ColorTheme", ParameterType.ColorTheme),
+			new ParameterToken("ImageFile",  ParameterType.ImageFile),
 			new ParameterToken("SVGFile",    ParameterType.SVGFile),
 			new ParameterToken("TeXFile",    ParameterType.TeXFile),
 			new ParameterToken("TeXString",  ParameterType.TeXString)
@@ -534,7 +538,13 @@ namespace EmbedFigure
 			EnterFunction();
 #endif
 			var figure_cache_entry = (FigureCacheEntry)context;
+
+			// Disposable objects
 			SD.Bitmap bitmap = null;
+			SD.Bitmap bitmap_temp = null;
+			SD.Graphics graphics = null;
+			SDI.ImageAttributes image_attributes = null;
+
 			byte[] pixels = null;
 			int bitmap_width = 0;
 			int bitmap_height = 0;
@@ -542,7 +552,48 @@ namespace EmbedFigure
 			double image_height = 0.0;
 			try
 			{
-				if (FigureSourceType.SVGFile == figure_cache_entry.m_FigureSourceType)
+				if (FigureSourceType.ImageFile == figure_cache_entry.m_FigureSourceType)
+				{
+					bitmap = new SD.Bitmap(figure_cache_entry.m_FigureSourceString);
+					image_height = bitmap.Height;
+
+					if (100.0 != figure_cache_entry.m_ZoomLevel)
+					{
+						bitmap_temp = bitmap;
+
+						double scale = figure_cache_entry.m_ZoomLevel / 100.0;
+						int scaled_width = S.Convert.ToInt32(bitmap_temp.Width * scale);
+						int scaled_height = S.Convert.ToInt32(bitmap_temp.Height * scale);
+
+						// Set up bitmap again for scaling
+						bitmap = new SD.Bitmap(scaled_width, scaled_height);
+						bitmap.SetResolution(bitmap_temp.HorizontalResolution, bitmap_temp.VerticalResolution);
+
+						// Set up graphics
+						graphics = SD.Graphics.FromImage(bitmap);
+						graphics.InterpolationMode = SDD2D.InterpolationMode.High;
+						graphics.CompositingQuality = SDD2D.CompositingQuality.HighQuality;
+						graphics.SmoothingMode = SDD2D.SmoothingMode.AntiAlias;
+						graphics.PixelOffsetMode = SDD2D.PixelOffsetMode.HighQuality;
+
+						image_attributes = new SDI.ImageAttributes();
+						image_attributes.SetWrapMode(SDD2D.WrapMode.TileFlipXY);
+						var scaled_rectangle = new SD.Rectangle(0, 0, scaled_width, scaled_height);
+						graphics.DrawImage(bitmap_temp, scaled_rectangle);
+					}
+
+					// Retrieve byte[] array that contains raw pixel data in BGRA format
+					SDI.BitmapData bitmap_data = bitmap.LockBits(new SD.Rectangle(0, 0, bitmap.Width, bitmap.Height), SDI.ImageLockMode.ReadOnly, SDI.PixelFormat.Format32bppArgb);
+
+					bitmap_width = bitmap_data.Width;
+					bitmap_height = bitmap_data.Height;
+					bitmap_stride = S.Math.Abs(bitmap_data.Stride);
+					int bitmap_size = bitmap_stride * bitmap_height;
+					pixels = new byte[bitmap_size];
+					SRIS.Marshal.Copy(bitmap_data.Scan0, pixels, 0, bitmap_size);
+					bitmap.UnlockBits(bitmap_data);
+				}
+				else if (FigureSourceType.SVGFile == figure_cache_entry.m_FigureSourceType)
 				{
 					Svg.SvgDocument svg_doc = Svg.SvgDocument.Open(figure_cache_entry.m_FigureSourceString);
 					bitmap = svg_doc.Draw();
@@ -553,8 +604,11 @@ namespace EmbedFigure
 					if (100.0 != figure_cache_entry.m_ZoomLevel)
 					{
 						// If zoom level is not 100%, render SVG file again in the resolution that matches the zoom level.
-						double zoom = figure_cache_entry.m_ZoomLevel / 100.0;
-						bitmap = svg_doc.Draw(S.Convert.ToInt32(bitmap.Width * zoom), S.Convert.ToInt32(bitmap.Height * zoom));
+						double scale = figure_cache_entry.m_ZoomLevel / 100.0;
+						int scaled_width = S.Convert.ToInt32(bitmap.Width * scale);
+						int scaled_height = S.Convert.ToInt32(bitmap.Height * scale);
+						bitmap.Dispose();   // Dispose bitmap before assigning new value
+						bitmap = svg_doc.Draw(scaled_width, scaled_height);
 					}
 
 					// Retrieve byte[] array that contains raw pixel data in BGRA format
@@ -652,13 +706,17 @@ namespace EmbedFigure
 				});
 			}
 			catch
-			{ }
+			{
+			}
 			finally
 			{
 #if TRACE
 				TraceMsg("Switched from Main RenderFigureTask");
 #endif
 				bitmap?.Dispose();
+				bitmap_temp?.Dispose();
+				graphics?.Dispose();
+				image_attributes?.Dispose();
 			}
 
 #if TRACE
@@ -1188,6 +1246,7 @@ namespace EmbedFigure
 					{
 						switch (parameter_name)
 						{
+							case ParameterType.ImageFile:
 							case ParameterType.SVGFile:
 							case ParameterType.TeXFile:
 								if (!figure_source_specified)
@@ -1224,7 +1283,11 @@ namespace EmbedFigure
 									// TODO: Support for full path and other rooted path types
 									out_figure_source_string = SIO.Path.GetDirectoryName(m_TextDocument.FilePath) + SIO.Path.DirectorySeparatorChar + local_path;
 
-									if (ParameterType.SVGFile == parameter_name)
+									if (ParameterType.ImageFile == parameter_name)
+									{
+										out_figure_source_type = FigureSourceType.ImageFile;
+									}
+									else if (ParameterType.SVGFile == parameter_name)
 									{
 										out_figure_source_type = FigureSourceType.SVGFile;
 									}
