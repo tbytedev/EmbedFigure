@@ -39,6 +39,7 @@ using SCG   = System.Collections.Generic;
 using SD    = System.Drawing;
 using SDD2D = System.Drawing.Drawing2D;
 using SDI   = System.Drawing.Imaging;
+using SG    = System.Globalization;
 using SIO   = System.IO;
 using SRIS  = System.Runtime.InteropServices;
 using ST    = System.Timers;
@@ -136,16 +137,16 @@ namespace EmbedFigure
 	{
 		internal readonly string m_FigureSourceString;
 		internal readonly FigureSourceType m_FigureSourceType;
-		internal readonly double m_ZoomLevel;
+		internal readonly double m_FigureScale;
 		internal readonly bool m_Inverted;
 
 		internal FigureCacheData m_FigureCacheData;
 
-		internal FigureCacheEntry(string figure_source_string, FigureSourceType figure_source_type, double zoom_level, bool inverted)
+		internal FigureCacheEntry(string figure_source_string, FigureSourceType figure_source_type, double figure_scale, bool inverted)
 		{
 			m_FigureSourceString = figure_source_string;
 			m_FigureSourceType = figure_source_type;
-			m_ZoomLevel = zoom_level;
+			m_FigureScale = figure_scale;
 			m_Inverted = inverted;
 		}
 
@@ -166,7 +167,7 @@ namespace EmbedFigure
 			return obj is FigureCacheEntry entry
 				&& m_FigureSourceString == entry.m_FigureSourceString
 				&& m_FigureSourceType   == entry.m_FigureSourceType
-				&& m_ZoomLevel          == entry.m_ZoomLevel
+				&& m_FigureScale        == entry.m_FigureScale
 				&& m_Inverted           == entry.m_Inverted;
 		}
 
@@ -187,7 +188,7 @@ namespace EmbedFigure
 			int hashCode = 2138992742;
 			hashCode = hashCode * -1521134295 + SCG.EqualityComparer<string>.Default.GetHashCode(m_FigureSourceString);
 			hashCode = hashCode * -1521134295 + m_FigureSourceType.GetHashCode();
-			hashCode = hashCode * -1521134295 + m_ZoomLevel.GetHashCode();
+			hashCode = hashCode * -1521134295 + m_FigureScale.GetHashCode();
 			hashCode = hashCode * -1521134295 + m_Inverted.GetHashCode();
 			return hashCode;
 		}
@@ -199,12 +200,14 @@ namespace EmbedFigure
 		internal readonly EmbedFigureManager m_Manager;
 		internal readonly FigureCacheEntry m_FigureCacheEntry;
 		internal readonly ColorTheme m_ColorTheme;
+		internal readonly double m_LineScale;
 
-		internal FigureRenderQueueEntry(EmbedFigureManager manager, FigureCacheEntry figure_cache_entry, ColorTheme color_tone)
+		internal FigureRenderQueueEntry(EmbedFigureManager manager, FigureCacheEntry figure_cache_entry, ColorTheme color_tone, double line_scale)
 		{
 			m_Manager = manager;
 			m_FigureCacheEntry = figure_cache_entry;
 			m_ColorTheme = color_tone;
+			m_LineScale = line_scale;
 		}
 	}
 
@@ -213,11 +216,13 @@ namespace EmbedFigure
 		internal FigureCacheEntry m_FigureCacheEntry;
 		internal Figure m_Figure;
 		internal ColorTheme m_ColorTheme;
+		internal double m_LineScale;
 		internal bool m_Added = false;
 
-		internal LineEntry(ColorTheme color_theme)
+		internal LineEntry(ColorTheme color_theme, double line_scale)
 		{
 			m_ColorTheme = color_theme;
+			m_LineScale = line_scale;
 		}
 	}
 
@@ -238,6 +243,7 @@ namespace EmbedFigure
 		UnknownParameter,
 		ColorTheme,
 		ImageFile,
+		Scale,
 		SVGFile,
 		TeXFile,
 		TeXString,
@@ -293,6 +299,12 @@ namespace EmbedFigure
 		private const double brightness_green = 0.587;
 		private const double brightness_blue  = 0.114;
 
+		private const double max_scale = 10;
+		private const double min_scale = 0.1;
+
+		private const double initial_tex_scale = 20.0;
+		private const string tex_font = "Arial";
+
 		/// <summary>
 		/// Stores rendered figures for each path in <see cref="SWMI.BitmapImage">BitmapImages</see>
 		/// It's accessed only from Main thread
@@ -310,6 +322,7 @@ namespace EmbedFigure
 		{
 			new ParameterToken("ColorTheme", ParameterType.ColorTheme),
 			new ParameterToken("ImageFile",  ParameterType.ImageFile),
+			new ParameterToken("Scale",      ParameterType.Scale),
 			new ParameterToken("SVGFile",    ParameterType.SVGFile),
 			new ParameterToken("TeXFile",    ParameterType.TeXFile),
 			new ParameterToken("TeXString",  ParameterType.TeXString)
@@ -557,13 +570,12 @@ namespace EmbedFigure
 					bitmap = new SD.Bitmap(figure_cache_entry.m_FigureSourceString);
 					image_height = bitmap.Height;
 
-					if (100.0 != figure_cache_entry.m_ZoomLevel)
+					if (1.0 != figure_cache_entry.m_FigureScale)
 					{
 						bitmap_temp = bitmap;
 
-						double scale = figure_cache_entry.m_ZoomLevel / 100.0;
-						int scaled_width = S.Convert.ToInt32(bitmap_temp.Width * scale);
-						int scaled_height = S.Convert.ToInt32(bitmap_temp.Height * scale);
+						int scaled_width = S.Convert.ToInt32(bitmap_temp.Width * figure_cache_entry.m_FigureScale);
+						int scaled_height = S.Convert.ToInt32(bitmap_temp.Height * figure_cache_entry.m_FigureScale);
 
 						// Set up bitmap again for scaling
 						bitmap = new SD.Bitmap(scaled_width, scaled_height);
@@ -601,12 +613,11 @@ namespace EmbedFigure
 
 					// SVG library doesn't provide a way to retrieve the dimensions of the image before rendering.
 					// But we can render the image and get the dimensions of the Bitmap.
-					if (100.0 != figure_cache_entry.m_ZoomLevel)
+					if (1.0 != figure_cache_entry.m_FigureScale)
 					{
 						// If zoom level is not 100%, render SVG file again in the resolution that matches the zoom level.
-						double scale = figure_cache_entry.m_ZoomLevel / 100.0;
-						int scaled_width = S.Convert.ToInt32(bitmap.Width * scale);
-						int scaled_height = S.Convert.ToInt32(bitmap.Height * scale);
+						int scaled_width = S.Convert.ToInt32(bitmap.Width * figure_cache_entry.m_FigureScale);
+						int scaled_height = S.Convert.ToInt32(bitmap.Height * figure_cache_entry.m_FigureScale);
 						bitmap.Dispose();   // Dispose bitmap before assigning new value
 						bitmap = svg_doc.Draw(scaled_width, scaled_height);
 					}
@@ -644,14 +655,14 @@ namespace EmbedFigure
 						await MVSS.ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
 
 						// UI related objects (System.Windows.Media.Imaging.BitmapSource) can be created and used only on Main thread
-						double zoom = 0.2 * figure_cache_entry.m_ZoomLevel;
-						WpfMath.TexRenderer renderer = formula.GetRenderer(WpfMath.TexStyle.Display, zoom, "Arial");
+						double tex_scale = initial_tex_scale * figure_cache_entry.m_FigureScale;
+						WpfMath.TexRenderer renderer = formula.GetRenderer(WpfMath.TexStyle.Display, tex_scale, tex_font);
 						SWMI.BitmapSource bitmap_source = renderer.RenderToBitmap(0.0, 0.0);
 
 						bitmap_width = bitmap_source.PixelWidth;
 						bitmap_height = bitmap_source.PixelHeight;
 						bitmap_stride = bitmap_width * bitmap_source.Format.BitsPerPixel / 8;
-						image_height = 20.0 * bitmap_source.Height / zoom;
+						image_height = bitmap_source.Height / figure_cache_entry.m_FigureScale;
 						int bitmap_size = bitmap_stride * bitmap_height;
 						pixels = new byte[bitmap_size];
 						bitmap_source.CopyPixels(pixels, bitmap_stride, 0);
@@ -705,6 +716,7 @@ namespace EmbedFigure
 #endif
 				});
 			}
+			// TODO: Error handling
 			catch
 			{
 			}
@@ -914,7 +926,7 @@ namespace EmbedFigure
 				var image = new SWC.Image
 				{
 					Source = line_entry.m_Figure.m_BitmapSource,
-					Height = line_entry.m_Figure.m_Height
+					Height = line_entry.m_Figure.m_Height * line_entry.m_LineScale
 				};
 
 				SWC.Canvas.SetLeft(image, geometry.Bounds.Left);
@@ -1176,11 +1188,12 @@ namespace EmbedFigure
 		/// Parse line. Search for #EmbedFigure instruction, and register figure changes.
 		/// </summary>
 		/// <param name="line">Line to add the adornments</param>
-		private void ParseLine(string line_string, out string out_figure_source_string, out FigureSourceType out_figure_source_type, out ColorTheme out_color_tone)
+		private void ParseLine(string line_string, out string out_figure_source_string, out FigureSourceType out_figure_source_type, out ColorTheme out_color_tone, out double out_line_scale)
 		{
 			out_figure_source_string = null;
 			out_figure_source_type = FigureSourceType.Unknown;
 			out_color_tone = ColorTheme.Unspecified;
+			out_line_scale = 1.0;
 			int line_length = line_string.Length;
 
 			int index_in_line;
@@ -1319,6 +1332,26 @@ namespace EmbedFigure
 									}
 								}
 								break;
+							case ParameterType.Scale:
+								int length = token.m_RawText.Length;
+								try
+								{
+									if ('%' == token.m_RawText[length - 1])
+									{
+										out_line_scale = 0.01 * double.Parse(token.m_RawText.Substring(0, length - 1), SG.NumberStyles.Float);
+									}
+									else
+									{
+										out_line_scale = double.Parse(token.m_RawText, SG.NumberStyles.Float);
+									}
+									// Clamp between max_scale and min_scale
+									out_line_scale = S.Math.Max(S.Math.Min(out_line_scale, max_scale), min_scale);
+								}
+								// TODO: Error handling
+								catch
+								{
+								}
+								break;
 						}
 						parameter_name = ParameterType.UnknownParameter;
 					}
@@ -1337,7 +1370,7 @@ namespace EmbedFigure
 		/// <param name="line">Line to add the adornments</param>
 		private void ProcessLine(MVST.SnapshotSpan snapshot_span, string line_text, int line_number)
 		{
-			ParseLine(line_text, out string figure_source_string, out FigureSourceType figure_source_type, out ColorTheme color_theme);
+			ParseLine(line_text, out string figure_source_string, out FigureSourceType figure_source_type, out ColorTheme color_theme, out double line_scale);
 
 			var line_id = new LineID(this, line_number);
 
@@ -1354,23 +1387,25 @@ namespace EmbedFigure
 			else
 			{
 				// There's a figure in this line
-				double zoom_level = m_TextView.ZoomLevel;
+				double zoom_level = m_TextView.ZoomLevel / 100.0;
+				double figure_scale = line_scale * zoom_level;
 				bool inverted = ColorTheme.Unspecified != color_theme && color_theme != m_ColorTheme;
 
 				if (m_LineEntries.TryGetValue(line_number, out LineEntry line_entry))
 				{
 					// There's a figure in this line now but there was already a figure in this line
 					line_entry.m_ColorTheme = color_theme;
+					line_entry.m_LineScale = line_scale;
 
 					if (line_entry.m_FigureCacheEntry.m_FigureSourceString != figure_source_string ||
 						line_entry.m_FigureCacheEntry.m_FigureSourceType   != figure_source_type ||
 						line_entry.m_FigureCacheEntry.m_Inverted           != inverted ||
-						line_entry.m_FigureCacheEntry.m_ZoomLevel          != zoom_level)
+						line_entry.m_FigureCacheEntry.m_FigureScale        != figure_scale)
 					{
 						// The current and the previous figures are different
 						RemoveFigure(line_number, line_entry);
 
-						FigureCacheEntry figure_cache_entry = new FigureCacheEntry(figure_source_string, figure_source_type, zoom_level, inverted);
+						FigureCacheEntry figure_cache_entry = new FigureCacheEntry(figure_source_string, figure_source_type, figure_scale, inverted);
 
 						if (s_FigureCache.TryGetValue(figure_cache_entry, out FigureCacheEntry stored_figure_cache_entry))
 						{
@@ -1385,15 +1420,15 @@ namespace EmbedFigure
 							line_entry.m_FigureCacheEntry = figure_cache_entry;
 							figure_cache_entry.m_FigureCacheData = new FigureCacheData(line_id);
 							s_FigureCache.Add(figure_cache_entry);
-							s_FigureRenderQueue.Add(new FigureRenderQueueEntry(this, figure_cache_entry, color_theme));
+							s_FigureRenderQueue.Add(new FigureRenderQueueEntry(this, figure_cache_entry, color_theme, line_scale));
 						}
 					}
 				}
 				else
 				{
 					// There's a figure in this line and there was no figure in this line previously
-					FigureCacheEntry figure_cache_entry = new FigureCacheEntry(figure_source_string, figure_source_type, zoom_level, inverted);
-					line_entry = new LineEntry(color_theme);
+					FigureCacheEntry figure_cache_entry = new FigureCacheEntry(figure_source_string, figure_source_type, figure_scale, inverted);
+					line_entry = new LineEntry(color_theme, line_scale);
 					if (s_FigureCache.TryGetValue(figure_cache_entry, out FigureCacheEntry stored_figure_cache_entry))
 					{
 						line_entry.m_FigureCacheEntry = stored_figure_cache_entry;
@@ -1406,7 +1441,7 @@ namespace EmbedFigure
 						line_entry.m_FigureCacheEntry = figure_cache_entry;
 						figure_cache_entry.m_FigureCacheData = new FigureCacheData(line_id);
 						s_FigureCache.Add(figure_cache_entry);
-						s_FigureRenderQueue.Add(new FigureRenderQueueEntry(this, figure_cache_entry, color_theme));
+						s_FigureRenderQueue.Add(new FigureRenderQueueEntry(this, figure_cache_entry, color_theme, line_scale));
 					}
 					m_LineEntries.Add(line_number, line_entry);
 				}
@@ -1497,7 +1532,7 @@ namespace EmbedFigure
 				bool inverted = line_entry.m_ColorTheme != m_ColorTheme;
 				var figure_cache_entry = new FigureCacheEntry(line_entry.m_FigureCacheEntry.m_FigureSourceString,
 				                                              line_entry.m_FigureCacheEntry.m_FigureSourceType,
-				                                              line_entry.m_FigureCacheEntry.m_ZoomLevel,
+				                                              line_entry.m_FigureCacheEntry.m_FigureScale,
 				                                              inverted);
 				if (s_FigureCache.TryGetValue(figure_cache_entry, out FigureCacheEntry stored_figure_cache_entry))
 				{
@@ -1511,7 +1546,7 @@ namespace EmbedFigure
 					line_entry.m_FigureCacheEntry = figure_cache_entry;
 					figure_cache_entry.m_FigureCacheData = new FigureCacheData(new LineID(this, line_number));
 					s_FigureCache.Add(figure_cache_entry);
-					s_FigureRenderQueue.Add(new FigureRenderQueueEntry(this, figure_cache_entry, line_entry.m_ColorTheme));
+					s_FigureRenderQueue.Add(new FigureRenderQueueEntry(this, figure_cache_entry, line_entry.m_ColorTheme, line_entry.m_LineScale));
 				}
 			}
 
@@ -1545,7 +1580,7 @@ namespace EmbedFigure
 			{
 				LineEntry line_entry = pair.Value;
 				int line_number = pair.Key;
-				s_FigureRenderQueue.Add(new FigureRenderQueueEntry(this, line_entry.m_FigureCacheEntry, line_entry.m_ColorTheme));
+				s_FigureRenderQueue.Add(new FigureRenderQueueEntry(this, line_entry.m_FigureCacheEntry, line_entry.m_ColorTheme, line_entry.m_LineScale));
 			}
 
 			ProcessLineRenderQueue();
@@ -1783,12 +1818,13 @@ namespace EmbedFigure
 #endif
 			StopTimer();
 
+			double zoom_level = m_TextView.ZoomLevel / 100.0;
 			// Remove those lines from render queue, which are about to render with a different zoom level
 			var figure_render_entries_to_remove = new SCG.List<FigureRenderQueueEntry>();
 			foreach (FigureRenderQueueEntry figure_render_queue_entry in s_FigureRenderQueue)
 			{
 				FigureCacheEntry figure_cache_entry = figure_render_queue_entry.m_FigureCacheEntry;
-				if (this == figure_render_queue_entry.m_Manager && figure_cache_entry.m_ZoomLevel != m_TextView.ZoomLevel)
+				if (this == figure_render_queue_entry.m_Manager && figure_cache_entry.m_FigureScale != zoom_level * figure_render_queue_entry.m_LineScale)
 				{
 					figure_render_entries_to_remove.Add(figure_render_queue_entry);
 				}
@@ -1805,7 +1841,7 @@ namespace EmbedFigure
 				RemoveFigure(line_number, line_entry);
 				var figure_cache_entry = new FigureCacheEntry(line_entry.m_FigureCacheEntry.m_FigureSourceString,
 				                                              line_entry.m_FigureCacheEntry.m_FigureSourceType,
-				                                              m_TextView.ZoomLevel,
+				                                              line_entry.m_LineScale * zoom_level,
 				                                              line_entry.m_FigureCacheEntry.m_Inverted);
 				if (s_FigureCache.TryGetValue(figure_cache_entry, out FigureCacheEntry stored_figure_cache_entry))
 				{
@@ -1818,7 +1854,7 @@ namespace EmbedFigure
 				{
 					figure_cache_entry.m_FigureCacheData = new FigureCacheData(new LineID(this, line_number));
 					s_FigureCache.Add(figure_cache_entry);
-					s_FigureRenderQueue.Add(new FigureRenderQueueEntry(this, figure_cache_entry, line_entry.m_ColorTheme));
+					s_FigureRenderQueue.Add(new FigureRenderQueueEntry(this, figure_cache_entry, line_entry.m_ColorTheme, line_entry.m_LineScale));
 					line_entry.m_FigureCacheEntry = figure_cache_entry;
 				}
 			}
@@ -1894,7 +1930,7 @@ namespace EmbedFigure
 			{
 				if (null != line_entry.m_Figure)
 				{
-					figure_height = line_entry.m_Figure.m_Height;
+					figure_height = line_entry.m_Figure.m_Height * line_entry.m_LineScale;
 				}
 			}
 
