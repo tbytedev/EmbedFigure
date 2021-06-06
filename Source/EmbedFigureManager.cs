@@ -76,16 +76,6 @@ namespace EmbedFigure
 		TexString
 	}
 
-
-	internal struct ChangeRanges
-	{
-		internal int m_OldFirstLineNumber;
-		internal int m_OldLastLineNumber;
-		internal int m_NewFirstLineNumber;
-		internal int m_NewLastLineNumber;
-		internal int m_LineCountDelta;
-	}
-
 	internal struct LineNumberShift
 	{
 		internal int m_OldLineNumber;
@@ -215,6 +205,7 @@ namespace EmbedFigure
 	{
 		internal FigureCacheEntry m_FigureCacheEntry;
 		internal Figure m_Figure;
+		internal string m_ErrorMessage;
 		internal ColorTheme m_ColorTheme;
 		internal double m_LineScale;
 		internal bool m_Added = false;
@@ -359,6 +350,8 @@ namespace EmbedFigure
 #endif
 
 		internal static uint s_UpdateID = 0;
+
+		internal static double s_ErrorMessageHeight = 13.0;
 
 		private static bool s_CacheCanHaveUnreferencedEntries = false;
 
@@ -923,15 +916,33 @@ namespace EmbedFigure
 			SWM.Geometry geometry = m_TextView.TextViewLines.GetMarkerGeometry(snapshot_span);
 			if (null != geometry)
 			{
-				var image = new SWC.Image
+				if (null == line_entry.m_ErrorMessage)
 				{
-					Source = line_entry.m_Figure.m_BitmapSource,
-					Height = line_entry.m_Figure.m_Height * line_entry.m_LineScale
-				};
+					var image = new SWC.Image
+					{
+						Source = line_entry.m_Figure.m_BitmapSource,
+						Height = line_entry.m_Figure.m_Height * line_entry.m_LineScale
+					};
 
-				SWC.Canvas.SetLeft(image, geometry.Bounds.Left);
-				SWC.Canvas.SetTop(image, geometry.Bounds.Bottom);
-				m_AdornmentLayer.AddAdornment(MVSTE.AdornmentPositioningBehavior.TextRelative, snapshot_span, line_number, image, OnAdornmentRemoved);
+					SWC.Canvas.SetLeft(image, geometry.Bounds.Left);
+					SWC.Canvas.SetTop(image, geometry.Bounds.Bottom);
+
+					m_AdornmentLayer.AddAdornment(MVSTE.AdornmentPositioningBehavior.TextRelative, snapshot_span, line_number, image, OnAdornmentRemoved);
+				}
+				else
+				{
+					var text_block = new SWC.TextBlock();
+					text_block.Foreground = SWM.Brushes.Red;
+					text_block.Text = line_entry.m_ErrorMessage;
+					text_block.Measure(new SW.Size(m_TextView.ViewportWidth, double.PositiveInfinity));
+					s_ErrorMessageHeight = text_block.DesiredSize.Height;
+
+					SWC.Canvas.SetLeft(text_block, geometry.Bounds.Left);
+					SWC.Canvas.SetTop(text_block, geometry.Bounds.Bottom);
+
+					m_AdornmentLayer.AddAdornment(MVSTE.AdornmentPositioningBehavior.TextRelative, snapshot_span, line_number, text_block, OnAdornmentRemoved);
+				}
+
 				line_entry.m_Added = true;
 #if TRACE_ADORNMENT_ADD_LINE_NUMBER
 				TraceMsg("Adornment add line number: " + line_number);
@@ -944,6 +955,12 @@ namespace EmbedFigure
 
 		private void AddVisibleAdornments(int first_line_number_to_add_adornment, int last_line_number_to_add_adornment)
 		{
+			if (m_TextView.TextViewLines.FormattedSpan.Start == m_TextView.TextViewLines.FormattedSpan.End)
+			{
+				// This file is empty, just return
+				return;
+			}
+
 			int first_visible_line_number = m_TextView.TextSnapshot.GetLineNumberFromPosition(m_TextView.TextViewLines.FormattedSpan.Start);
 			int last_visible_line_number = m_TextView.TextSnapshot.GetLineNumberFromPosition(m_TextView.TextViewLines.FormattedSpan.End - 1);
 
@@ -968,7 +985,7 @@ namespace EmbedFigure
 				}
 
 				LineEntry line_entry = pair.Value;
-				if (null == line_entry.m_Figure || line_entry.m_Added)
+				if ((null == line_entry.m_Figure && null == line_entry.m_ErrorMessage) || line_entry.m_Added)
 				{
 					continue;
 				}
@@ -1188,11 +1205,11 @@ namespace EmbedFigure
 		/// Parse line. Search for #EmbedFigure instruction, and register figure changes.
 		/// </summary>
 		/// <param name="line">Line to add the adornments</param>
-		private void ParseLine(string line_string, out string out_figure_source_string, out FigureSourceType out_figure_source_type, out ColorTheme out_color_tone, out double out_line_scale)
+		private string ParseLine(string line_string, out string out_figure_source_string, out FigureSourceType out_figure_source_type, out ColorTheme out_color_theme, out double out_line_scale)
 		{
 			out_figure_source_string = null;
 			out_figure_source_type = FigureSourceType.Unknown;
-			out_color_tone = ColorTheme.Unspecified;
+			out_color_theme = ColorTheme.Unspecified;
 			out_line_scale = 1.0;
 			int line_length = line_string.Length;
 
@@ -1217,7 +1234,7 @@ namespace EmbedFigure
 				{
 					if (index_in_line == line_length)
 					{
-						return;
+						return null;
 					}
 					if (s_InstructionCharArray[index_in_instruction] != line_string[index_in_line])
 					{
@@ -1227,7 +1244,7 @@ namespace EmbedFigure
 
 				if (index_in_line == line_length)
 				{
-					return;
+					return "No parameters specified.";
 				}
 
 				// Instruction must be followed by a whitespace
@@ -1242,7 +1259,7 @@ namespace EmbedFigure
 					++index_in_line;
 					if (index_in_line == line_length)
 					{
-						return;
+						return "No parameters specified.";
 					}
 				}
 				while (char.IsWhiteSpace(line_string[index_in_line]));
@@ -1252,6 +1269,7 @@ namespace EmbedFigure
 				ParameterType parameter_name = ParameterType.UnknownParameter;
 
 				bool figure_source_specified = false;
+				bool figure_scale_specified = false;
 
 				foreach (ParameterToken token in tokens)
 				{
@@ -1320,36 +1338,51 @@ namespace EmbedFigure
 								}
 								break;
 							case ParameterType.ColorTheme:
-								if (ColorTheme.Unspecified == out_color_tone)
+								if (ColorTheme.Unspecified == out_color_theme)
 								{
 									if ("dark" == token.m_RawText)
 									{
-										out_color_tone = ColorTheme.Dark;
+										out_color_theme = ColorTheme.Dark;
 									}
 									else if ("light" == token.m_RawText)
 									{
-										out_color_tone = ColorTheme.Light;
+										out_color_theme = ColorTheme.Light;
+									}
+									else
+									{
+										return "Invalid ColorTheme : \"" + token.m_RawText + "\"";
 									}
 								}
 								break;
 							case ParameterType.Scale:
-								int length = token.m_RawText.Length;
-								try
+								if (!figure_scale_specified)
 								{
-									if ('%' == token.m_RawText[length - 1])
+									figure_scale_specified = true;
+									int length = token.m_RawText.Length;
+									try
 									{
-										out_line_scale = 0.01 * double.Parse(token.m_RawText.Substring(0, length - 1), SG.NumberStyles.Float);
+										if ('%' == token.m_RawText[length - 1])
+										{
+											out_line_scale = 0.01 * double.Parse(token.m_RawText.Substring(0, length - 1), SG.NumberStyles.Float);
+										}
+										else
+										{
+											out_line_scale = double.Parse(token.m_RawText, SG.NumberStyles.Float);
+										}
+
+										if (out_line_scale < min_scale)
+										{
+											return "Scale is less than the minimum scale (" + min_scale + ")";
+										}
+										else if (max_scale < out_line_scale)
+										{
+											return "Scale is greater than the maximum scale (" + max_scale + ")";
+										}
 									}
-									else
+									catch
 									{
-										out_line_scale = double.Parse(token.m_RawText, SG.NumberStyles.Float);
+										return "Invalid Scale : \"" + token.m_RawText + "\"";
 									}
-									// Clamp between max_scale and min_scale
-									out_line_scale = S.Math.Max(S.Math.Min(out_line_scale, max_scale), min_scale);
-								}
-								// TODO: Error handling
-								catch
-								{
 								}
 								break;
 						}
@@ -1360,8 +1393,9 @@ namespace EmbedFigure
 						parameter_name = token.m_Type;
 					}
 				}
-				return;
+				break;
 			}
+			return null;
 		}
 
 		/// <summary>
@@ -1370,17 +1404,34 @@ namespace EmbedFigure
 		/// <param name="line">Line to add the adornments</param>
 		private void ProcessLine(MVST.SnapshotSpan snapshot_span, string line_text, int line_number)
 		{
-			ParseLine(line_text, out string figure_source_string, out FigureSourceType figure_source_type, out ColorTheme color_theme, out double line_scale);
+			string error_message = ParseLine(line_text, out string figure_source_string, out FigureSourceType figure_source_type, out ColorTheme color_theme, out double line_scale);
 
 			var line_id = new LineID(this, line_number);
 
-			if (null == figure_source_string)
+			if (null != error_message)
+			{
+				if (m_LineEntries.TryGetValue(line_number, out LineEntry line_entry))
+				{
+					if (error_message != line_entry.m_ErrorMessage)
+					{
+						RemoveFigure(line_number, line_entry);
+					}
+					line_entry.m_ErrorMessage = error_message;
+				}
+				else
+				{
+					line_entry = new LineEntry(color_theme, line_scale);
+					line_entry.m_ErrorMessage = error_message;
+					m_LineEntries.Add(line_number, line_entry);
+				}
+			}
+			else if (null == figure_source_string)
 			{
 				// Currently there's no figure specified in this line
-				if (m_LineEntries.TryGetValue(line_number, out LineEntry old_line_entry))
+				if (m_LineEntries.TryGetValue(line_number, out LineEntry line_entry))
 				{
 					// But there was a figure in this line previously. Remove previous figure.
-					RemoveFigure(line_number, old_line_entry);
+					RemoveFigure(line_number, line_entry);
 					m_LineEntries.Remove(line_number);
 				}
 			}
@@ -1397,10 +1448,18 @@ namespace EmbedFigure
 					line_entry.m_ColorTheme = color_theme;
 					line_entry.m_LineScale = line_scale;
 
-					if (line_entry.m_FigureCacheEntry.m_FigureSourceString != figure_source_string ||
-						line_entry.m_FigureCacheEntry.m_FigureSourceType   != figure_source_type ||
-						line_entry.m_FigureCacheEntry.m_Inverted           != inverted ||
-						line_entry.m_FigureCacheEntry.m_FigureScale        != figure_scale)
+					if (null != line_entry.m_ErrorMessage)
+					{
+
+					}
+
+					line_entry.m_ErrorMessage = null;
+
+					if (null                 == line_entry.m_FigureCacheEntry ||
+						figure_source_string != line_entry.m_FigureCacheEntry.m_FigureSourceString ||
+						figure_source_type   != line_entry.m_FigureCacheEntry.m_FigureSourceType ||
+						inverted             != line_entry.m_FigureCacheEntry.m_Inverted ||
+						figure_scale         != line_entry.m_FigureCacheEntry.m_FigureScale)
 					{
 						// The current and the previous figures are different
 						RemoveFigure(line_number, line_entry);
@@ -1448,6 +1507,11 @@ namespace EmbedFigure
 			}
 		}
 
+		/// <summary>
+		/// Remove adornment from the UI
+		/// </summary>
+		/// <param name="line_number">Line number from where the adornment should be removed</param>
+		/// <param name="line_entry">Corresponding line entry</param>
 		private void RemoveAdornment(int line_number, LineEntry line_entry)
 		{
 			if (line_entry.m_Added)
@@ -1456,22 +1520,23 @@ namespace EmbedFigure
 			}
 		}
 
+		/// <summary>
+		/// Remove adornment from the UI and unlink cache data from the line entry
+		/// </summary>
+		/// <param name="line_number">Line number from where the adornment should be removed</param>
+		/// <param name="line_entry">Corresponding line entry</param>
 		private void RemoveFigure(int line_number, LineEntry line_entry)
 		{
 			RemoveAdornment(line_number, line_entry);
-			FigureCacheData figure_cache_data = line_entry.m_FigureCacheEntry.m_FigureCacheData;
-			if (figure_cache_data.RemoveLineID(new LineID(this, line_number)))
+			if (null != line_entry.m_FigureCacheEntry)
 			{
-				s_CacheCanHaveUnreferencedEntries = true;
+				FigureCacheData figure_cache_data = line_entry.m_FigureCacheEntry.m_FigureCacheData;
+				if (figure_cache_data.RemoveLineID(new LineID(this, line_number)))
+				{
+					s_CacheCanHaveUnreferencedEntries = true;
+				}
 			}
 			line_entry.m_Figure = null;
-		}
-
-		private void ShiftFigureLineNumber(LineNumberShift line_number_shift)
-		{
-			FigureCacheData figure_cache_data = line_number_shift.m_LineEntry.m_FigureCacheEntry.m_FigureCacheData;
-			figure_cache_data.RemoveLineID(new LineID(this, line_number_shift.m_OldLineNumber));
-			figure_cache_data.AddLineID(new LineID(this, line_number_shift.m_NewLineNumber));
 		}
 
 		private void OnAdornmentRemoved(object tag, SW.UIElement element)
@@ -1529,6 +1594,12 @@ namespace EmbedFigure
 				}
 
 				RemoveFigure(line_number, line_entry);
+
+				if (null == line_entry.m_FigureCacheEntry)
+				{
+					continue;
+				}
+
 				bool inverted = line_entry.m_ColorTheme != m_ColorTheme;
 				var figure_cache_entry = new FigureCacheEntry(line_entry.m_FigureCacheEntry.m_FigureSourceString,
 				                                              line_entry.m_FigureCacheEntry.m_FigureSourceType,
@@ -1539,7 +1610,7 @@ namespace EmbedFigure
 					line_entry.m_FigureCacheEntry = stored_figure_cache_entry;
 					FigureCacheData figure_cache_data = stored_figure_cache_entry.m_FigureCacheData;
 					figure_cache_data.AddLineID(new LineID(this, line_number));
-					AddFigure(line_number, line_entry, figure_cache_data);
+					line_entry.m_Figure = figure_cache_data.m_Figure;
 				}
 				else
 				{
@@ -1551,6 +1622,8 @@ namespace EmbedFigure
 			}
 
 			ProcessLineRenderQueue();
+			AddVisibleAdornments(0, int.MaxValue);
+
 			if (s_CacheCanHaveUnreferencedEntries)
 			{
 				StartTimer();
@@ -1579,8 +1652,10 @@ namespace EmbedFigure
 			foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineEntries)
 			{
 				LineEntry line_entry = pair.Value;
-				int line_number = pair.Key;
-				s_FigureRenderQueue.Add(new FigureRenderQueueEntry(this, line_entry.m_FigureCacheEntry, line_entry.m_ColorTheme, line_entry.m_LineScale));
+				if (null != line_entry.m_FigureCacheEntry)
+				{
+					s_FigureRenderQueue.Add(new FigureRenderQueueEntry(this, line_entry.m_FigureCacheEntry, line_entry.m_ColorTheme, line_entry.m_LineScale));
+				}
 			}
 
 			ProcessLineRenderQueue();
@@ -1680,95 +1755,66 @@ namespace EmbedFigure
 #if DEBUG
 				TRC_SD.Debug.Assert(e.OldSnapshot.Version.Next == e.NewSnapshot.Version);
 #endif
+				first_line_number_to_add_adornment = 0;
+				last_line_number_to_add_adornment = int.MaxValue;
 
 				MVST.ITextSnapshot old_text_snapshot = e.OldSnapshot;
 
-				// There could be more changes in a single line. Convert INormalizedTextChangeCollection changes to line based changes.
-				var change_ranges = new ChangeRanges[changes.Count];
-				int num_change_ranges = 0;
-				foreach (MVST.ITextChange change in changes)
-				{
-					int old_line_number = old_text_snapshot.GetLineNumberFromPosition(change.OldPosition);
-					int new_line_number = text_snapshot.GetLineNumberFromPosition(change.NewPosition);
+				SCG.IEnumerator<MVST.ITextChange> change_enumerator = changes.GetEnumerator();
+				change_enumerator.MoveNext();
+				MVST.ITextChange change = change_enumerator.Current;
 
-					if (0 < num_change_ranges && old_line_number == change_ranges[num_change_ranges-1].m_OldLastLineNumber)
-					{
-						--num_change_ranges;
-						change_ranges[num_change_ranges].m_LineCountDelta += change.LineCountDelta;
-					}
-					else
-					{
-						change_ranges[num_change_ranges].m_OldFirstLineNumber = old_line_number;
-						change_ranges[num_change_ranges].m_NewFirstLineNumber = new_line_number;
-						change_ranges[num_change_ranges].m_LineCountDelta = change.LineCountDelta;
-					}
-
-					for (;;)
-					{
-						++old_line_number;
-						old_text_snapshot.GetLineNumberFromPosition(old_line_number);
-						MVST.ITextSnapshotLine line = old_text_snapshot.GetLineFromLineNumber(old_line_number);
-						if (change.OldEnd <= line.Start)
-						{
-							change_ranges[num_change_ranges].m_OldLastLineNumber = old_line_number - 1;
-							break;
-						}
-					}
-
-					for (;;)
-					{
-						++new_line_number;
-						text_snapshot.GetLineNumberFromPosition(new_line_number);
-						MVST.ITextSnapshotLine line = text_snapshot.GetLineFromLineNumber(new_line_number);
-						if (change.NewEnd <= line.Start)
-						{
-							change_ranges[num_change_ranges].m_NewLastLineNumber = new_line_number - 1;
-							break;
-						}
-					}
-
-					++num_change_ranges;
-				}
+				int line_count_delta = 0;
 
 				var line_number_shifts = new LineNumberShift[m_LineEntries.Count];
-				int change_ranges_index = 0;
 				int num_line_number_shifts = 0;
-				int line_count_delta = 0;
+
 				foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineEntries)
 				{
 					int line_number = pair.Key;
 					LineEntry line_entry = pair.Value;
+					MVST.ITextSnapshotLine line = old_text_snapshot.GetLineFromLineNumber(line_number);
 
-					while (change_ranges_index < num_change_ranges && change_ranges[change_ranges_index].m_OldLastLineNumber < line_number)
+					// Iterate through those changes that are before this line entity
+					while (null != change && change.OldEnd <= line.Start)
 					{
-						line_count_delta += change_ranges[change_ranges_index].m_LineCountDelta;
-						++change_ranges_index;
-					}
-
-					if (change_ranges_index < num_change_ranges && change_ranges[change_ranges_index].m_OldFirstLineNumber <= line_number && line_number <= change_ranges[change_ranges_index].m_OldLastLineNumber)
-					{
-						if (0 > change_ranges[change_ranges_index].m_LineCountDelta)
+						line_count_delta += change.LineCountDelta;
+						if (change_enumerator.MoveNext())
 						{
-							if (line_number + change_ranges[change_ranges_index].m_LineCountDelta < change_ranges[change_ranges_index].m_OldFirstLineNumber)
-							{
-								line_number_shifts[num_line_number_shifts].m_OldLineNumber = line_number;
-								line_number_shifts[num_line_number_shifts].m_NewLineNumber = -1;
-								line_number_shifts[num_line_number_shifts].m_LineEntry = line_entry;
-								++num_line_number_shifts;
-								continue;
-							}
+							change = change_enumerator.Current;
+						}
+						else
+						{
+							change = null;
 						}
 					}
 
-					if (0 != line_count_delta)
+					if (null == change || line.EndIncludingLineBreak <= change.OldPosition)
 					{
-						line_number_shifts[num_line_number_shifts].m_OldLineNumber = line_number;
-						line_number_shifts[num_line_number_shifts].m_NewLineNumber = line_number + line_count_delta;
-						line_number_shifts[num_line_number_shifts].m_LineEntry = line_entry;
-						++num_line_number_shifts;
+						// The current change is after this line entity. It means that it shouldn't be taken account yet.
+						// Register the line number shift for the current line entity if the accumulated line delta is not 0,
+						// and carry on to the next line entity.
+						if (0 != line_count_delta)
+						{
+							line_number_shifts[num_line_number_shifts].m_OldLineNumber = line_number;
+							line_number_shifts[num_line_number_shifts].m_NewLineNumber = line_number + line_count_delta;
+							line_number_shifts[num_line_number_shifts].m_LineEntry = line_entry;
+							++num_line_number_shifts;
+						}
+						continue;
 					}
+
+					// The current change and the current line entity overlap each other, so this line entity has been changed.
+					// Just mark this line entity to be removed, It may be added again later in ProcessLine(), if the it's still valid.
+					line_number_shifts[num_line_number_shifts].m_OldLineNumber = line_number;
+					line_number_shifts[num_line_number_shifts].m_NewLineNumber = -1;	// -1 means that there's no new line number. This line entity must be removed.
+					line_number_shifts[num_line_number_shifts].m_LineEntry = line_entry;
+					++num_line_number_shifts;
 				}
 
+				change_enumerator.Dispose();
+
+				// Remove line entities that are about to shift line and their adornments
 				for (int i = 0; i < num_line_number_shifts; ++i)
 				{
 					RemoveAdornment(line_number_shifts[i].m_OldLineNumber, line_number_shifts[i].m_LineEntry);
@@ -1777,10 +1823,16 @@ namespace EmbedFigure
 
 				for (int i = 0; i < num_line_number_shifts; ++i)
 				{
-					if (0 < line_number_shifts[i].m_NewLineNumber)
+					if (0 <= line_number_shifts[i].m_NewLineNumber)
 					{
 						m_LineEntries.Add(line_number_shifts[i].m_NewLineNumber, line_number_shifts[i].m_LineEntry);
-						ShiftFigureLineNumber(line_number_shifts[i]);
+
+						if (null != line_number_shifts[i].m_LineEntry.m_FigureCacheEntry)
+						{
+							FigureCacheData figure_cache_data = line_number_shifts[i].m_LineEntry.m_FigureCacheEntry.m_FigureCacheData;
+							figure_cache_data.RemoveLineID(new LineID(this, line_number_shifts[i].m_OldLineNumber));
+							figure_cache_data.AddLineID(new LineID(this, line_number_shifts[i].m_NewLineNumber));
+						}
 					}
 					else
 					{
@@ -1788,12 +1840,28 @@ namespace EmbedFigure
 					}
 				}
 
-				for (int i = 0; i < num_change_ranges; ++i)
+				int last_line_number = 0;
+				foreach (MVST.ITextChange curr_change in changes)
 				{
-					for (int line_number = change_ranges[i].m_NewFirstLineNumber; line_number <= change_ranges[i].m_NewLastLineNumber; ++line_number)
+					int line_number = text_snapshot.GetLineNumberFromPosition(curr_change.NewPosition);
+					// There could be more changes in a single line.
+					if (last_line_number != line_number)
 					{
-						MVST.ITextSnapshotLine new_change_line = text_snapshot.GetLineFromLineNumber(line_number);
-						ProcessLine(new_change_line.Extent, new_change_line.GetText(), line_number);
+						MVST.ITextSnapshotLine line = text_snapshot.GetLineFromLineNumber(line_number);
+						ProcessLine(line.Extent, line.GetText(), line_number);
+						last_line_number = line_number;
+					}
+
+					for (;;)
+					{
+						++line_number;
+						MVST.ITextSnapshotLine line = text_snapshot.GetLineFromLineNumber(line_number);
+						if (curr_change.NewEnd <= line.Start)
+						{
+							break;
+						}
+						ProcessLine(line.Extent, line.GetText(), line_number);
+						last_line_number = line_number;
 					}
 				}
 			}
@@ -1839,6 +1907,12 @@ namespace EmbedFigure
 				LineEntry line_entry = pair.Value;
 				int line_number = pair.Key;
 				RemoveFigure(line_number, line_entry);
+
+				if (null == line_entry.m_FigureCacheEntry)
+				{
+					continue;
+				}
+
 				var figure_cache_entry = new FigureCacheEntry(line_entry.m_FigureCacheEntry.m_FigureSourceString,
 				                                              line_entry.m_FigureCacheEntry.m_FigureSourceType,
 				                                              line_entry.m_LineScale * zoom_level,
@@ -1848,7 +1922,7 @@ namespace EmbedFigure
 					line_entry.m_FigureCacheEntry = stored_figure_cache_entry;
 					FigureCacheData figure_cache_data = stored_figure_cache_entry.m_FigureCacheData;
 					figure_cache_data.AddLineID(new LineID(this, line_number));
-					AddFigure(line_number, line_entry, stored_figure_cache_entry.m_FigureCacheData);
+					line_entry.m_Figure = figure_cache_data.m_Figure;
 				}
 				else
 				{
@@ -1858,6 +1932,9 @@ namespace EmbedFigure
 					line_entry.m_FigureCacheEntry = figure_cache_entry;
 				}
 			}
+
+			AddVisibleAdornments(0, int.MaxValue);
+
 			if (0 < s_FigureRenderQueue.Count || s_CacheCanHaveUnreferencedEntries)
 			{
 				StartTimer();
@@ -1925,12 +2002,16 @@ namespace EmbedFigure
 			MVSTF.LineTransform dlt = line.DefaultLineTransform;
 			int line_number = line.Snapshot.GetLineNumberFromPosition(line.Start);
 
-			double figure_height = 0.0;
+			double adornment_height = 0.0;
 			if (m_Manager.m_LineEntries.TryGetValue(line_number, out LineEntry line_entry))
 			{
+				if (null != line_entry.m_ErrorMessage)
+				{
+					adornment_height = EmbedFigureManager.s_ErrorMessageHeight;
+				}
 				if (null != line_entry.m_Figure)
 				{
-					figure_height = line_entry.m_Figure.m_Height * line_entry.m_LineScale;
+					adornment_height = line_entry.m_Figure.m_Height * line_entry.m_LineScale;
 				}
 			}
 
@@ -1938,7 +2019,7 @@ namespace EmbedFigure
 			EmbedFigureManager.LeaveFunction();
 #endif
 
-			return new MVSTF.LineTransform(clt.TopSpace, dlt.BottomSpace + figure_height, clt.VerticalScale);
+			return new MVSTF.LineTransform(clt.TopSpace, dlt.BottomSpace + adornment_height, clt.VerticalScale);
 		}
 	}
 }
