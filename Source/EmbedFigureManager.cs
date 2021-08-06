@@ -1390,6 +1390,10 @@ namespace EmbedFigure
 					}
 					else
 					{
+						if (ParameterType.UnknownParameter == token.m_Type)
+						{
+							return "Unknown parameter : \"" + token.m_RawText + "\"";
+						}
 						parameter_name = token.m_Type;
 					}
 				}
