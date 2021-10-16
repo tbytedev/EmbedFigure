@@ -34,6 +34,7 @@ using MVSSI = Microsoft.VisualStudio.Shell.Interop;
 using MVST  = Microsoft.VisualStudio.Text;
 using MVSTE = Microsoft.VisualStudio.Text.Editor;
 using MVSTF = Microsoft.VisualStudio.Text.Formatting;
+using MVSTT = Microsoft.VisualStudio.Text.Tagging;
 using S     = System;
 using SCG   = System.Collections.Generic;
 using SD    = System.Drawing;
@@ -203,11 +204,27 @@ namespace EmbedFigure
 
 	internal class LineEntry
 	{
+		/// <summary>
+		/// Figure data for this line.
+		/// </summary>
+		/// <remarks>
+		/// It's set right after the line is parsed, however the <see cref="Figure"/> reference inside this object can bee null until the rendering has been finished.
+		/// </remarks>
 		internal FigureCacheEntry m_FigureCacheEntry;
+		/// <summary>
+		/// Stores data about the rendered figure
+		/// </summary>
+		/// <remarks>
+		/// This is null, if the figure is not rendered yet. After the rendering is finished it's set to the proper value
+		/// </remarks>
 		internal Figure m_Figure;
+		/// <summary>
+		/// It there's an error in this line it contains the error message, otherwise it's null.
+		/// </summary>
 		internal string m_ErrorMessage;
 		internal ColorTheme m_ColorTheme;
 		internal double m_LineScale;
+		internal int m_StartPositionIndex = -1;
 		internal bool m_Added = false;
 
 		internal LineEntry(ColorTheme color_theme, double line_scale)
@@ -282,9 +299,7 @@ namespace EmbedFigure
 	/// </summary>
 	internal class EmbedFigureManager
 	{
-		// ----------------------------------------------------------------
-		// Static members
-		// ----------------------------------------------------------------
+		#region Constants
 
 		private const double brightness_red   = 0.299;
 		private const double brightness_green = 0.587;
@@ -295,6 +310,10 @@ namespace EmbedFigure
 
 		private const double initial_tex_scale = 20.0;
 		private const string tex_font = "Arial";
+
+		#endregion
+
+		#region Static variables
 
 		/// <summary>
 		/// Stores rendered figures for each path in <see cref="SWMI.BitmapImage">BitmapImages</see>
@@ -351,8 +370,6 @@ namespace EmbedFigure
 
 		internal static uint s_UpdateID = 0;
 
-		internal static double s_ErrorMessageHeight = 13.0;
-
 		private static bool s_CacheCanHaveUnreferencedEntries = false;
 
 		private static ST.ElapsedEventHandler s_TimerEventHandler;
@@ -367,6 +384,10 @@ namespace EmbedFigure
 		/// If the two values are the same no Stop() method has been called between the timer start and timer raise.
 		/// </remarks>
 		private static int s_TimerStartID = 0;
+
+		#endregion
+
+		#region Static functions
 
 		/// <summary>
 		/// Set up a sorted list of invalid characters, because it's faster to search in sorted arrays.
@@ -844,9 +865,9 @@ namespace EmbedFigure
 #endif
 		}
 
-		// ----------------------------------------------------------------
-		// Non static members
-		// ----------------------------------------------------------------
+		#endregion
+
+		#region Member variables
 
 		/// <summary>
 		/// The layer of the adornment.
@@ -872,6 +893,10 @@ namespace EmbedFigure
 		/// Current color theme
 		/// </summary>
 		private ColorTheme m_ColorTheme = ColorTheme.Unspecified;
+
+		#endregion
+
+		#region Member functions
 
 		/// <summary>
 		/// Initializes a new instance of the <see cref="EmbedFigureManager"/> class.
@@ -916,32 +941,16 @@ namespace EmbedFigure
 			SWM.Geometry geometry = m_TextView.TextViewLines.GetMarkerGeometry(snapshot_span);
 			if (null != geometry)
 			{
-				if (null == line_entry.m_ErrorMessage)
+				var image = new SWC.Image
 				{
-					var image = new SWC.Image
-					{
-						Source = line_entry.m_Figure.m_BitmapSource,
-						Height = line_entry.m_Figure.m_Height * line_entry.m_LineScale
-					};
+					Source = line_entry.m_Figure.m_BitmapSource,
+					Height = line_entry.m_Figure.m_Height * line_entry.m_LineScale
+				};
 
-					SWC.Canvas.SetLeft(image, geometry.Bounds.Left);
-					SWC.Canvas.SetTop(image, geometry.Bounds.Bottom);
+				SWC.Canvas.SetLeft(image, geometry.Bounds.Left);
+				SWC.Canvas.SetTop(image, geometry.Bounds.Bottom);
 
-					m_AdornmentLayer.AddAdornment(MVSTE.AdornmentPositioningBehavior.TextRelative, snapshot_span, line_number, image, OnAdornmentRemoved);
-				}
-				else
-				{
-					var text_block = new SWC.TextBlock();
-					text_block.Foreground = SWM.Brushes.Red;
-					text_block.Text = line_entry.m_ErrorMessage;
-					text_block.Measure(new SW.Size(m_TextView.ViewportWidth, double.PositiveInfinity));
-					s_ErrorMessageHeight = text_block.DesiredSize.Height;
-
-					SWC.Canvas.SetLeft(text_block, geometry.Bounds.Left);
-					SWC.Canvas.SetTop(text_block, geometry.Bounds.Bottom);
-
-					m_AdornmentLayer.AddAdornment(MVSTE.AdornmentPositioningBehavior.TextRelative, snapshot_span, line_number, text_block, OnAdornmentRemoved);
-				}
+				m_AdornmentLayer.AddAdornment(MVSTE.AdornmentPositioningBehavior.TextRelative, snapshot_span, line_number, image, OnAdornmentRemoved);
 
 				line_entry.m_Added = true;
 #if TRACE_ADORNMENT_ADD_LINE_NUMBER
@@ -985,7 +994,7 @@ namespace EmbedFigure
 				}
 
 				LineEntry line_entry = pair.Value;
-				if ((null == line_entry.m_Figure && null == line_entry.m_ErrorMessage) || line_entry.m_Added)
+				if (null == line_entry.m_Figure || line_entry.m_Added)
 				{
 					continue;
 				}
@@ -1205,12 +1214,13 @@ namespace EmbedFigure
 		/// Parse line. Search for #EmbedFigure instruction, and register figure changes.
 		/// </summary>
 		/// <param name="line">Line to add the adornments</param>
-		private string ParseLine(string line_string, out string out_figure_source_string, out FigureSourceType out_figure_source_type, out ColorTheme out_color_theme, out double out_line_scale)
+		private string ParseLine(string line_string, out int out_start_position_index, out string out_figure_source_string, out FigureSourceType out_figure_source_type, out ColorTheme out_color_theme, out double out_line_scale)
 		{
 			out_figure_source_string = null;
 			out_figure_source_type = FigureSourceType.Unknown;
 			out_color_theme = ColorTheme.Unspecified;
 			out_line_scale = 1.0;
+			out_start_position_index = -1;
 			int line_length = line_string.Length;
 
 			int index_in_line;
@@ -1228,6 +1238,7 @@ namespace EmbedFigure
 					continue;
 				}
 
+				int start_position_index = index_in_line;
 				++index_in_line;
 				// Compare instruction
 				for (int index_in_instruction = 0; index_in_instruction < s_InstructionCharArray.Length; ++index_in_instruction, ++index_in_line)
@@ -1238,21 +1249,24 @@ namespace EmbedFigure
 					}
 					if (s_InstructionCharArray[index_in_instruction] != line_string[index_in_line])
 					{
-						goto _again;
+						goto _again;	// continue without incrementing the loop variable
+
 					}
 				}
 
 				if (index_in_line == line_length)
 				{
+					out_start_position_index = start_position_index;
 					return "No parameters specified.";
 				}
 
 				// Instruction must be followed by a whitespace
 				if (!char.IsWhiteSpace(line_string[index_in_line]))
 				{
-					goto _again;
+					goto _again;	// continue without incrementing the loop variable
 				}
 
+				out_start_position_index = start_position_index;
 				// Skip spaces between instruction and first parameter
 				do
 				{
@@ -1408,33 +1422,36 @@ namespace EmbedFigure
 		/// <param name="line">Line to add the adornments</param>
 		private void ProcessLine(MVST.SnapshotSpan snapshot_span, string line_text, int line_number)
 		{
-			string error_message = ParseLine(line_text, out string figure_source_string, out FigureSourceType figure_source_type, out ColorTheme color_theme, out double line_scale);
+			string error_message = ParseLine(line_text, out int start_position_index, out string figure_source_string, out FigureSourceType figure_source_type, out ColorTheme color_theme, out double line_scale);
 
 			var line_id = new LineID(this, line_number);
 
 			if (null != error_message)
 			{
+				// The line is erroneous
 				if (m_LineEntries.TryGetValue(line_number, out LineEntry line_entry))
 				{
-					if (error_message != line_entry.m_ErrorMessage)
+					if (null == line_entry.m_ErrorMessage)
 					{
+						// The line was correct before. We don't want to display anything if there's an error in the line, so the figure is not valid any more.
 						RemoveFigure(line_number, line_entry);
 					}
-					line_entry.m_ErrorMessage = error_message;
 				}
 				else
 				{
+					// Create new line entry for the error message
 					line_entry = new LineEntry(color_theme, line_scale);
-					line_entry.m_ErrorMessage = error_message;
 					m_LineEntries.Add(line_number, line_entry);
 				}
+				line_entry.m_ErrorMessage = error_message;
+				line_entry.m_StartPositionIndex = start_position_index;
 			}
 			else if (null == figure_source_string)
 			{
-				// Currently there's no figure specified in this line
+				// Currently there's no figure or error message specified in this line
 				if (m_LineEntries.TryGetValue(line_number, out LineEntry line_entry))
 				{
-					// But there was a figure in this line previously. Remove previous figure.
+					// But there was a figure or an error message in this line previously. Remove line entry.
 					RemoveFigure(line_number, line_entry);
 					m_LineEntries.Remove(line_number);
 				}
@@ -1452,12 +1469,8 @@ namespace EmbedFigure
 					line_entry.m_ColorTheme = color_theme;
 					line_entry.m_LineScale = line_scale;
 
-					if (null != line_entry.m_ErrorMessage)
-					{
-
-					}
-
 					line_entry.m_ErrorMessage = null;
+					line_entry.m_StartPositionIndex = -1;
 
 					if (null                 == line_entry.m_FigureCacheEntry ||
 						figure_source_string != line_entry.m_FigureCacheEntry.m_FigureSourceString ||
@@ -1539,6 +1552,7 @@ namespace EmbedFigure
 				{
 					s_CacheCanHaveUnreferencedEntries = true;
 				}
+				line_entry.m_FigureCacheEntry = null;
 			}
 			line_entry.m_Figure = null;
 		}
@@ -1971,6 +1985,8 @@ namespace EmbedFigure
 			TraceMsg("Leave: " + function_name);
 		}
 #endif
+
+		#endregion
 	}
 
 	/// <summary>
@@ -2009,10 +2025,6 @@ namespace EmbedFigure
 			double adornment_height = 0.0;
 			if (m_Manager.m_LineEntries.TryGetValue(line_number, out LineEntry line_entry))
 			{
-				if (null != line_entry.m_ErrorMessage)
-				{
-					adornment_height = EmbedFigureManager.s_ErrorMessageHeight;
-				}
 				if (null != line_entry.m_Figure)
 				{
 					adornment_height = line_entry.m_Figure.m_Height * line_entry.m_LineScale;
@@ -2024,6 +2036,99 @@ namespace EmbedFigure
 #endif
 
 			return new MVSTF.LineTransform(clt.TopSpace, dlt.BottomSpace + adornment_height, clt.VerticalScale);
+		}
+	}
+
+	internal class EmbedFigureErrorTagger : MVSTT.ITagger<MVSTT.ErrorTag>
+	{
+		private EmbedFigureManager m_Manager;
+
+#pragma warning disable 67
+		/// <summary>
+		/// We need this declaration to fulfill ITagger interface requirement.
+		/// We should raise this event when tags are changed, but as there's no listener for this, we just leave this unused.
+		/// </summary>
+		public event S.EventHandler<MVST.SnapshotSpanEventArgs> TagsChanged;
+#pragma warning restore 67
+
+		internal EmbedFigureErrorTagger(MVSTE.ITextView text_view)
+		{
+			foreach (EmbedFigureManager manager in EmbedFigureManager.s_Managers)
+			{
+				if (manager.m_TextView == text_view)
+				{
+					m_Manager = manager;
+					return;
+				}
+			}
+		}
+
+		public SCG.IEnumerable<MVSTT.ITagSpan<MVSTT.ErrorTag>> GetTags(MVST.NormalizedSnapshotSpanCollection spans)
+		{
+			var tag_list = new SCG.List<MVSTT.TagSpan<MVSTT.ErrorTag>>();
+
+			MVSTE.IWpfTextView text_view = m_Manager.m_TextView;
+
+			int first_visible_line_number = text_view.TextSnapshot.GetLineNumberFromPosition(text_view.TextViewLines.FormattedSpan.Start);
+			int last_visible_line_number = text_view.TextSnapshot.GetLineNumberFromPosition(text_view.TextViewLines.FormattedSpan.End - 1);
+
+			SCG.IEnumerator<MVST.SnapshotSpan> span_enumerator = spans.GetEnumerator();
+			if (!span_enumerator.MoveNext())
+			{
+				return tag_list;
+			}
+
+			foreach (SCG.KeyValuePair<int, LineEntry> pair in m_Manager.m_LineEntries)
+			{
+				int line_number = pair.Key;
+				LineEntry line_entry = pair.Value;
+
+				if (line_number < first_visible_line_number)
+				{
+					// Skip those lines that precede the first visible line
+					continue;
+				}
+
+				if (line_number > last_visible_line_number)
+				{
+					// Skip the rest of the lines, because they succeed the last visible line
+					return tag_list;
+				}
+
+				if (null == line_entry.m_ErrorMessage)
+				{
+					// There's no error message in this line, so just skip
+					continue;
+				}
+
+				MVST.SnapshotSpan line_span = text_view.TextSnapshot.GetLineFromLineNumber(line_number).Extent;
+				MVST.SnapshotSpan line_error_span = new MVST.SnapshotSpan(line_span.Start.Add(line_entry.m_StartPositionIndex), line_span.End);
+
+				while (span_enumerator.Current.End < line_error_span.Start)
+				{
+					// Skip those spans that precede the the current line
+					if (!span_enumerator.MoveNext())
+					{
+						// Return if we reached the last span
+						return tag_list;
+					}
+				}
+
+				if (span_enumerator.Current.Start > line_error_span.End)
+				{
+					// Proceed to the next line if the current span succeed the current line
+					continue;
+				}
+
+				MVST.SnapshotSpan? error_span = line_error_span.Intersection(span_enumerator.Current);
+				if (error_span.HasValue)
+				{
+					var error_tag = new MVSTT.ErrorTag("EmbedFigure error type", "EmbedFigure | " + line_entry.m_ErrorMessage);
+					MVSTT.TagSpan<MVSTT.ErrorTag> tag_span = new MVSTT.TagSpan<MVSTT.ErrorTag>(error_span.Value, error_tag);
+					tag_list.Add(tag_span);
+				}
+			}
+			return tag_list;
 		}
 	}
 }

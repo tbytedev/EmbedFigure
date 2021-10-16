@@ -16,7 +16,9 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+using MVSLI = Microsoft.VisualStudio.Language.Intellisense;
 using MVST  = Microsoft.VisualStudio.Text;
+using MVSTT = Microsoft.VisualStudio.Text.Tagging;
 using MVSTE = Microsoft.VisualStudio.Text.Editor;
 using MVSTF = Microsoft.VisualStudio.Text.Formatting;
 using MVSU  = Microsoft.VisualStudio.Utilities;
@@ -25,7 +27,7 @@ using SCMC  = System.ComponentModel.Composition;
 namespace EmbedFigure
 {
 	/// <summary>
-	/// Exports the <see cref="MVSTE.IWpfTextViewCreationListener"/> and <see cref="MVSTE.AdornmentLayerDefinition"/>
+	/// Exports the <see cref="MVSTE.IWpfTextViewCreationListener"/> and <see cref="MVSTE.AdornmentLayerDefinition"/>, imports <see cref="MVST.ITextDocumentFactoryService"/>
 	/// Instantiates the <see cref="EmbedFigureManager"/> on the event of a <see cref="MVSTE.IWpfTextView"/>'s creation, if it wasn't already instantiated.
 	/// </summary>
 	[MVSTE.TextViewRole(MVSTE.PredefinedTextViewRoles.Document)]
@@ -73,7 +75,7 @@ namespace EmbedFigure
 	}
 
 	/// <summary>
-	/// Exports the <see cref="MVSTE.IWpfTextViewCreationListener"/> and <see cref="MVSTE.AdornmentLayerDefinition"/>
+	/// Exports the <see cref="MVSTF.ILineTransformSourceProvider"/> and imports <see cref="MVST.ITextDocumentFactoryService"/>
 	/// Instantiates the <see cref="EmbedFigureManager"/> on the event of a <see cref="Create(MVSTE.IWpfTextView)"/>, if it wasn't already instantiated.
 	/// </summary>
 	[MVSTE.TextViewRole(MVSTE.PredefinedTextViewRoles.Interactive)]
@@ -98,8 +100,39 @@ namespace EmbedFigure
 		/// <param name="text_view">The view upon which the adornment should be placed</param>
 		public MVSTF.ILineTransformSource Create(MVSTE.IWpfTextView text_view)
 		{
+			if (null == text_view || null == text_view.TextBuffer)
+			{
+				return null;
+			}
+
 			EmbedFigureManager manager = text_view.Properties.GetOrCreateSingletonProperty(() => new EmbedFigureManager(text_view, m_TextDocumentFactoryService));
 			return new EmbedFigureLineTransformSource(manager);
+		}
+	}
+
+	/// <summary>
+	/// Exports the <see cref="MVSTT.ITaggerProvider"/>.
+	/// </summary>
+	[MVSTT.TagType(typeof(MVSTT.IErrorTag))]
+	[MVSU.ContentType("code")]
+	[MVSU.Name("EmbedFigure ErrorTagger")]
+	[SCMC.Export(typeof(MVSTT.IViewTaggerProvider))]
+	internal class ErrorTaggerProvider : MVSTT.IViewTaggerProvider
+	{
+		/// <summary>
+		/// Called when the tagger for the specified <see cref="MVST.ITextBuffer"/> that has a matching content type should be created.
+		/// </summary>
+		/// <remarks>This function is called by the framework on Main Thread</remarks>
+		/// <param name="text_view">The <see cref="MVSTE.ITextView"/> on which the tagger operates</param>
+		/// <param name="text_buffer">The <see cref="MVST.ITextBuffer"/> on which the tagger operates</param>
+		public MVSTT.ITagger<T> CreateTagger<T>(MVSTE.ITextView text_view, MVST.ITextBuffer text_buffer) where T : MVSTT.ITag
+		{
+			if (null == text_buffer)
+			{
+				return null;
+			}
+
+			return new EmbedFigureErrorTagger(text_view) as MVSTT.ITagger<T>;
 		}
 	}
 }
