@@ -1,6 +1,6 @@
 ﻿/*
  * EmbedFigure - Visual Studio extension for embedding math figures into source code
- * Copyright(C) 2021 Tamas Kezdi
+ * Copyright(C) 2022 Tamas Kezdi
  *
  * This program is free software : you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,7 +20,9 @@
 #undef TRACE
 
 #if TRACE
+#define TRACE_FUNCTIONS
 #define TRACE_LAYOUT_CHANGED
+#define TRACE_LAYOUT_SPAN_CHANGED
 #define TRACE_ADORNMENT_ADD_LINE_NUMBER
 #define TRACE_ADORNMENT_REMOVE_LINE_NUMBER
 #define TRACE_LINE_TRANSFORM_LINE_NUMBERS
@@ -208,7 +210,8 @@ namespace EmbedFigure
 		/// Figure data for this line.
 		/// </summary>
 		/// <remarks>
-		/// It's set right after the line is parsed, however the <see cref="Figure"/> reference inside this object can bee null until the rendering has been finished.
+		/// It's set right after the line is parsed, however the <see cref="Figure"/> reference inside this object can be null until the rendering has been finished.
+		/// It's set to null if there's an error in this line.
 		/// </remarks>
 		internal FigureCacheEntry m_FigureCacheEntry;
 		/// <summary>
@@ -350,7 +353,7 @@ namespace EmbedFigure
 		/// Do not load and render figures at once while user is still typing, rather wait some time to let things settle down a bit.
 		/// Rendering is commenced when this timer is elapsed.
 		/// </remarks>
-		private static readonly ST.Timer s_Timer = new ST.Timer(1500);
+		private static readonly ST.Timer s_Timer;
 
 		/// <summary>
 		/// Stores the figures to render and the lines to refresh
@@ -367,7 +370,6 @@ namespace EmbedFigure
 		private static readonly TRC_ST.ThreadLocal<string> s_ThreadName = new TRC_ST.ThreadLocal<string>(() => { return "Thread " + (10 > TRC_ST.Thread.CurrentThread.ManagedThreadId ? " " + TRC_ST.Thread.CurrentThread.ManagedThreadId : TRC_ST.Thread.CurrentThread.ManagedThreadId.ToString()); });
 		private static readonly TRC_ST.ThreadLocal<int>    s_Indent     = new TRC_ST.ThreadLocal<int>   (() => { return 0; });
 #endif
-
 		internal static uint s_UpdateID = 0;
 
 		private static bool s_CacheCanHaveUnreferencedEntries = false;
@@ -384,6 +386,8 @@ namespace EmbedFigure
 		/// If the two values are the same no Stop() method has been called between the timer start and timer raise.
 		/// </remarks>
 		private static int s_TimerStartID = 0;
+
+		private static EmbedFigureOptions s_Options = EmbedFigureOptions.Instance;
 
 		#endregion
 
@@ -404,6 +408,9 @@ namespace EmbedFigure
 			s_InvalidChars = invalid_chars.ToArray();
 			S.Array.Sort(s_InvalidChars);
 
+			s_Options.OptionsChanged += OnOptionsChangedStatic;
+
+			s_Timer = new ST.Timer(s_Options.UpdateDelay);
 			s_Timer.AutoReset = false;
 
 #if HANDLE_FOCUS
@@ -559,9 +566,9 @@ namespace EmbedFigure
 			}
 		}
 
-		public static void RenderFigureTask(object context)
+		private static void RenderFigureTask(object context)
 		{
-#if TRACE
+#if TRACE_FUNCTIONS
 			EnterFunction();
 #endif
 			var figure_cache_entry = (FigureCacheEntry)context;
@@ -745,7 +752,7 @@ namespace EmbedFigure
 				image_attributes?.Dispose();
 			}
 
-#if TRACE
+#if TRACE_FUNCTIONS
 			LeaveFunction();
 #endif
 		}
@@ -830,13 +837,23 @@ namespace EmbedFigure
 			}
 		}
 
+		private static void OnOptionsChangedStatic(object sender, S.EventArgs e)
+		{
+			if (s_Options.m_PrevUpdateDelay == s_Options.UpdateDelay)
+			{
+				return;
+			}
+
+			s_Timer.Interval = s_Options.UpdateDelay;
+		}
+
 		/// <summary>
 		/// This timer is fired after the user hasn't changed the text for 1500 ms and there are figures to render.
 		/// </summary>
 		/// <remarks>This function is called by the framework on a Worker Thread</remarks>
 		private static void TimerElapsed(int timer_start_id)
 		{
-#if TRACE
+#if TRACE_FUNCTIONS
 			EnterFunction();
 			TraceMsg("Switch to Main TimerElapsed");
 #endif
@@ -860,7 +877,7 @@ namespace EmbedFigure
 #if TRACE
 			TraceMsg("Switched from Main TimerElapsed");
 #endif
-#if TRACE
+#if TRACE_FUNCTIONS
 			LeaveFunction();
 #endif
 		}
@@ -890,9 +907,19 @@ namespace EmbedFigure
 		internal SCG.SortedDictionary<int, LineEntry> m_LineEntries = new SCG.SortedDictionary<int, LineEntry>();
 
 		/// <summary>
+		/// Stores line heights for line numbers. If there's no height stored for a line it means the height is 0.
+		/// </summary>
+		internal SCG.Dictionary<int, double> m_LastReturnedLineHeights = new SCG.Dictionary<int, double>();
+
+		/// <summary>
 		/// Current color theme
 		/// </summary>
 		private ColorTheme m_ColorTheme = ColorTheme.Unspecified;
+
+		/// <summary>
+		/// Indicates wether OnLayoutChanged should return immediately
+		/// </summary>
+		private bool SkipOnLayoutChanged = false;
 
 		#endregion
 
@@ -931,11 +958,13 @@ namespace EmbedFigure
 #endif
 			m_TextView.LayoutChanged          += OnLayoutChanged;
 			m_TextView.ZoomLevelChanged       += OnZoomLevelChanged;
+
+			s_Options.OptionsChanged          += OnOptionsChanged;
 		}
 
 		private void AddAdornment(MVST.SnapshotSpan snapshot_span, int line_number, LineEntry line_entry)
 		{
-#if TRACE
+#if TRACE_FUNCTIONS
 			EnterFunction();
 #endif
 			SWM.Geometry geometry = m_TextView.TextViewLines.GetMarkerGeometry(snapshot_span);
@@ -950,14 +979,15 @@ namespace EmbedFigure
 				SWC.Canvas.SetLeft(image, geometry.Bounds.Left);
 				SWC.Canvas.SetTop(image, geometry.Bounds.Bottom);
 
+				line_entry.m_Added = true;
+
 				m_AdornmentLayer.AddAdornment(MVSTE.AdornmentPositioningBehavior.TextRelative, snapshot_span, line_number, image, OnAdornmentRemoved);
 
-				line_entry.m_Added = true;
 #if TRACE_ADORNMENT_ADD_LINE_NUMBER
 				TraceMsg("Adornment add line number: " + line_number);
 #endif
 			}
-#if TRACE
+#if TRACE_FUNCTIONS
 			LeaveFunction();
 #endif
 		}
@@ -999,7 +1029,7 @@ namespace EmbedFigure
 					continue;
 				}
 				MVST.ITextSnapshotLine text_snapshot_line = m_TextView.TextSnapshot.GetLineFromLineNumber(line_number);
-				AddAdornment(text_snapshot_line.Extent, line_number, line_entry);
+				MVSTE.TextViewExtensions.QueuePostLayoutAction(m_TextView, () => { UpdateLineHeight(line_number); AddAdornment(text_snapshot_line.Extent, line_number, line_entry); });
 			}
 		}
 
@@ -1011,27 +1041,11 @@ namespace EmbedFigure
 				return;
 			}
 
-			// Get the first line from m_TextView.TextViewLines, this is not the same as m_TextView.TextViewLines.FirstVisibleLine.
-			// It's possible that m_TextView.TextViewLines[0] is hidden and it's before m_TextView.TextViewLines.FirstVisibleLine
-			MVSTF.IWpfTextViewLine first_view_line = m_TextView.TextViewLines[0];
-			int first_view_line_number = m_TextView.TextSnapshot.GetLineNumberFromPosition(first_view_line.Start);
-			int view_line_number = line_number - first_view_line_number;
-
-			// Skip lines that has no corresponding line in m_TextView.TextViewLines
-			if (0 > view_line_number)
+			MVSTF.IWpfTextViewLine text_view_line = UpdateLineHeight(line_number);
+			if (null != text_view_line)
 			{
-				return;
+				AddAdornment(text_view_line.Extent, line_number, line_entry);
 			}
-			if (m_TextView.TextViewLines.Count <= view_line_number)
-			{
-				return;
-			}
-
-			// Refresh line
-			MVSTF.IWpfTextViewLine curr_view_line = m_TextView.TextViewLines[view_line_number];
-			AddAdornment(curr_view_line.Extent, line_number, line_entry);
-			// Force calling of GetLineTransform for this line
-			m_TextView.DisplayTextLineContainingBufferPosition(curr_view_line.Start, curr_view_line.Top - m_TextView.ViewportTop, MVSTE.ViewRelativePosition.Top);
 		}
 
 		private SCG.List<ParameterToken> TokenizeParameters(string parameters_string)
@@ -1211,7 +1225,7 @@ namespace EmbedFigure
 		}
 
 		/// <summary>
-		/// Parse line. Search for #EmbedFigure instruction, and register figure changes.
+		/// Search for #EmbedFigure instruction, and if found parse its parameters.
 		/// </summary>
 		/// <param name="line">Line to add the adornments</param>
 		private string ParseLine(string line_string, out int out_start_position_index, out string out_figure_source_string, out FigureSourceType out_figure_source_type, out ColorTheme out_color_theme, out double out_line_scale)
@@ -1227,12 +1241,12 @@ namespace EmbedFigure
 			for (index_in_line = 0; index_in_line < line_length; ++index_in_line)
 			{
 			_again:
-				if ('#' != line_string[index_in_line])
+				if (s_Options.PrefixChar != line_string[index_in_line])
 				{
 					continue;
 				}
 
-				// '#' counts only if the previous character was not a letter or digit
+				// s_Options.PrefixChar matters only if the previous character was not a letter or digit
 				if (0 != index_in_line && char.IsLetterOrDigit(line_string[index_in_line - 1]))
 				{
 					continue;
@@ -1420,7 +1434,7 @@ namespace EmbedFigure
 		/// Parse line. Search for #EmbedFigure instruction, and register figure changes.
 		/// </summary>
 		/// <param name="line">Line to add the adornments</param>
-		private void ProcessLine(MVST.SnapshotSpan snapshot_span, string line_text, int line_number)
+		private void ProcessLine(string line_text, int line_number)
 		{
 			string error_message = ParseLine(line_text, out int start_position_index, out string figure_source_string, out FigureSourceType figure_source_type, out ColorTheme color_theme, out double line_scale);
 
@@ -1555,17 +1569,82 @@ namespace EmbedFigure
 				line_entry.m_FigureCacheEntry = null;
 			}
 			line_entry.m_Figure = null;
+			MVSTE.TextViewExtensions.QueuePostLayoutAction(m_TextView, () => { UpdateLineHeight(line_number); });
 		}
 
+		/// <summary>
+		/// Updates the height of the line.
+		/// </summary>
+		/// <remarks>
+		/// <para>Makes enough space under the line for the adornment. It makes the framework call GetLineTransform which calculates the requires space.</para>
+		/// <para>However there are some side effects. It also removes the adornment from the line and calls OnLayoutChanged.</para>
+		/// </remarks>
+		/// <param name="line_number">Line number to be updated</param>
+		private MVSTF.IWpfTextViewLine UpdateLineHeight(int line_number)
+		{
+			// Check if the line height has been changed
+			double target_line_height = 0.0;
+			if (m_LineEntries.TryGetValue(line_number, out LineEntry line_entry))
+			{
+				if (null != line_entry.m_Figure)
+				{
+					target_line_height = line_entry.m_Figure.m_Height * line_entry.m_LineScale;
+				}
+			}
+
+			m_LastReturnedLineHeights.TryGetValue(line_number, out double last_line_height);
+			if (target_line_height == last_line_height)
+			{
+				// The line height hasn't been changed since it was set.
+				return null;
+			}
+
+			// Get the first line from m_TextView.TextViewLines, this is not the same as m_TextView.TextViewLines.FirstVisibleLine.
+			// It's possible that m_TextView.TextViewLines[0] is hidden and it's before m_TextView.TextViewLines.FirstVisibleLine
+			MVSTF.IWpfTextViewLine first_view_line = m_TextView.TextViewLines[0];
+			int first_view_line_number = m_TextView.TextSnapshot.GetLineNumberFromPosition(first_view_line.Start);
+			int view_line_number = line_number - first_view_line_number;
+
+			// Skip lines that has no corresponding line in m_TextView.TextViewLines
+			if (0 > view_line_number)
+			{
+				return null;
+			}
+			if (m_TextView.TextViewLines.Count <= view_line_number)
+			{
+				return null;
+			}
+
+			MVSTF.IWpfTextViewLine text_view_line = m_TextView.TextViewLines[view_line_number];
+
+			SkipOnLayoutChanged = true;
+			// Force calling of GetLineTransform for this line. This makes space under the line to render the adornment.
+			// Side effect: it also removes the adornment from the line and calls OnLayoutChanged
+			m_TextView.DisplayTextLineContainingBufferPosition(text_view_line.Start, text_view_line.Top - m_TextView.ViewportTop, MVSTE.ViewRelativePosition.Top);
+			SkipOnLayoutChanged = false;
+
+			return text_view_line;
+		}
+
+		/// <summary>
+		/// Called by the system after the adornment has been removed.
+		/// </summary>
+		/// <remarks>
+		/// <para>The system automatically removes the adornments from those lines which are actually being edited.</para>
+		/// </remarks>
+		/// <param name="line_number">Line number from where the adornment should be removed</param>
+		/// <param name="line_entry">Corresponding line entry</param>
 		private void OnAdornmentRemoved(object tag, SW.UIElement element)
 		{
-#if TRACE
+#if TRACE_FUNCTIONS
 			EnterFunction();
 #endif
 			int line_number = (int)tag;
 			m_LineEntries[line_number].m_Added = false;
 #if TRACE_ADORNMENT_REMOVE_LINE_NUMBER
 			TraceMsg("Adornment remove line number: " + line_number);
+#endif
+#if TRACE_FUNCTIONS
 			LeaveFunction();
 #endif
 		}
@@ -1577,7 +1656,7 @@ namespace EmbedFigure
 			{
 				return;
 			}
-#if TRACE
+#if TRACE_FUNCTIONS
 			EnterFunction();
 #endif
 			m_ColorTheme = color_theme;
@@ -1604,16 +1683,15 @@ namespace EmbedFigure
 			foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineEntries)
 			{
 				LineEntry line_entry = pair.Value;
-				int line_number = pair.Key;
-				// If color theme is unspecified, leave the figure as it is
-				if (ColorTheme.Unspecified == line_entry.m_ColorTheme)
+
+				// Skip this line if it's only an error message and there's no figure.
+				if (null != line_entry.m_ErrorMessage)
 				{
 					continue;
 				}
 
-				RemoveFigure(line_number, line_entry);
-
-				if (null == line_entry.m_FigureCacheEntry)
+				// If color theme is unspecified, leave the figure as it is
+				if (ColorTheme.Unspecified == line_entry.m_ColorTheme)
 				{
 					continue;
 				}
@@ -1623,6 +1701,10 @@ namespace EmbedFigure
 				                                              line_entry.m_FigureCacheEntry.m_FigureSourceType,
 				                                              line_entry.m_FigureCacheEntry.m_FigureScale,
 				                                              inverted);
+
+				int line_number = pair.Key;
+				RemoveFigure(line_number, line_entry);
+
 				if (s_FigureCache.TryGetValue(figure_cache_entry, out FigureCacheEntry stored_figure_cache_entry))
 				{
 					line_entry.m_FigureCacheEntry = stored_figure_cache_entry;
@@ -1639,6 +1721,8 @@ namespace EmbedFigure
 				}
 			}
 
+			// We can process s_FigureRenderQueue this early, because background color changes only occasionally.
+			// It's unlikely that it changes again before the previous rendering is finished.
 			ProcessLineRenderQueue();
 			AddVisibleAdornments(0, int.MaxValue);
 
@@ -1646,7 +1730,7 @@ namespace EmbedFigure
 			{
 				StartTimer();
 			}
-#if TRACE
+#if TRACE_FUNCTIONS
 			LeaveFunction();
 #endif
 		}
@@ -1660,7 +1744,7 @@ namespace EmbedFigure
 #if HANDLE_FOCUS
 		private void OnGotFocus(object sender, S.EventArgs e)
 		{
-#if TRACE
+#if TRACE_FUNCTIONS
 			EnterFunction();
 #endif
 			StopTimer();
@@ -1677,7 +1761,7 @@ namespace EmbedFigure
 			}
 
 			ProcessLineRenderQueue();
-#if TRACE
+#if TRACE_FUNCTIONS
 			LeaveFunction();
 #endif
 		}
@@ -1697,7 +1781,12 @@ namespace EmbedFigure
 		/// <param name="e">The event arguments.</param>
 		private void OnLayoutChanged(object sender, MVSTE.TextViewLayoutChangedEventArgs e)
 		{
-#if TRACE
+			if (SkipOnLayoutChanged)
+			{
+				return;
+			}
+
+#if TRACE_FUNCTIONS
 			EnterFunction();
 #endif
 			StopTimer();
@@ -1729,6 +1818,7 @@ namespace EmbedFigure
 				}
 			}
 
+#if TRACE_LAYOUT_SPAN_CHANGED
 			if (0 < e.NewOrReformattedSpans.Count)
 			{
 				TraceMsg("--------");
@@ -1753,23 +1843,25 @@ namespace EmbedFigure
 				}
 			}
 #endif
-
+#endif
 			int first_line_number_to_add_adornment = int.MaxValue;
 			int last_line_number_to_add_adornment  = int.MinValue;
 			MVST.INormalizedTextChangeCollection changes = e.OldSnapshot.Version.Changes;
 			if (null == changes || !changes.IncludesLineChanges || 0 == m_LineEntries.Count)
 			{
+				// Lines were not moved, so there was no line insertion or deletion
 				foreach (MVSTF.ITextViewLine line in e.NewOrReformattedLines)
 				{
 					MVST.SnapshotSpan snapshot_span = line.Extent;
 					int line_number = text_snapshot.GetLineNumberFromPosition(line.Start);
 					first_line_number_to_add_adornment = S.Math.Min(first_line_number_to_add_adornment, line_number);
 					last_line_number_to_add_adornment  = S.Math.Max(last_line_number_to_add_adornment,  line_number);
-					ProcessLine(snapshot_span, text_snapshot.GetText(snapshot_span.Span), text_snapshot.GetLineNumberFromPosition(line.Start));
+					ProcessLine(text_snapshot.GetText(snapshot_span.Span), text_snapshot.GetLineNumberFromPosition(line.Start));
 				}
 			}
 			else
 			{
+				// There were line insertion or deletion, track line movements
 #if DEBUG
 				TRC_SD.Debug.Assert(e.OldSnapshot.Version.Next == e.NewSnapshot.Version);
 #endif
@@ -1866,7 +1958,7 @@ namespace EmbedFigure
 					if (last_line_number != line_number)
 					{
 						MVST.ITextSnapshotLine line = text_snapshot.GetLineFromLineNumber(line_number);
-						ProcessLine(line.Extent, line.GetText(), line_number);
+						ProcessLine(line.GetText(), line_number);
 						last_line_number = line_number;
 					}
 
@@ -1878,7 +1970,7 @@ namespace EmbedFigure
 						{
 							break;
 						}
-						ProcessLine(line.Extent, line.GetText(), line_number);
+						ProcessLine(line.GetText(), line_number);
 						last_line_number = line_number;
 					}
 				}
@@ -1890,22 +1982,62 @@ namespace EmbedFigure
 			{
 				StartTimer();
 			}
-#if TRACE
+#if TRACE_FUNCTIONS
 			LeaveFunction();
 #endif
+		}
+
+		private void OnOptionsChanged(object sender, S.EventArgs e)
+		{
+			if (s_Options.m_PrevPrefixChar == s_Options.PrefixChar)
+			{
+				return;
+			}
+
+			StopTimer();
+
+			s_FigureRenderQueue.Clear();
+			foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineEntries)
+			{
+				LineEntry line_entry = pair.Value;
+				int line_number = pair.Key;
+				RemoveFigure(line_number, line_entry);
+			}
+			m_LineEntries.Clear();
+
+			if (m_TextView.TextViewLines.FormattedSpan.Start == m_TextView.TextViewLines.FormattedSpan.End)
+			{
+				// This file is empty, just return
+				return;
+			}
+
+			int first_visible_line_number = m_TextView.TextSnapshot.GetLineNumberFromPosition(m_TextView.TextViewLines.FormattedSpan.Start);
+			int last_visible_line_number = m_TextView.TextSnapshot.GetLineNumberFromPosition(m_TextView.TextViewLines.FormattedSpan.End - 1);
+			for (int i = first_visible_line_number; i <= last_visible_line_number; ++i)
+			{
+				MVST.ITextSnapshotLine line = m_TextView.TextSnapshot.GetLineFromLineNumber(i);
+				ProcessLine(line.GetText(), i);
+			}
+
+			AddVisibleAdornments(first_visible_line_number, last_visible_line_number);
+
+			if (0 < s_FigureRenderQueue.Count || s_CacheCanHaveUnreferencedEntries)
+			{
+				StartTimer();
+			}
 		}
 
 		/// <summary>Called when zoom is changed</summary>
 		/// <remarks>This function is called by the framework on the MainThread</remarks>
 		private void OnZoomLevelChanged(object sender, MVSTE.ZoomLevelChangedEventArgs e)
 		{
-#if TRACE
+#if TRACE_FUNCTIONS
 			EnterFunction();
 #endif
 			StopTimer();
 
 			double zoom_level = m_TextView.ZoomLevel / 100.0;
-			// Remove those lines from render queue, which are about to render with a different zoom level
+			// Remove those lines from render queue, which are about to be rendered with a different zoom level
 			var figure_render_entries_to_remove = new SCG.List<FigureRenderQueueEntry>();
 			foreach (FigureRenderQueueEntry figure_render_queue_entry in s_FigureRenderQueue)
 			{
@@ -1920,13 +2052,13 @@ namespace EmbedFigure
 				s_FigureRenderQueue.Remove(figure_render_queue_entry);
 			}
 
+			// Update line entities
 			foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineEntries)
 			{
 				LineEntry line_entry = pair.Value;
-				int line_number = pair.Key;
-				RemoveFigure(line_number, line_entry);
 
-				if (null == line_entry.m_FigureCacheEntry)
+				// Skip this line if it's only an error message and there's no figure.
+				if (null != line_entry.m_ErrorMessage)
 				{
 					continue;
 				}
@@ -1935,6 +2067,10 @@ namespace EmbedFigure
 				                                              line_entry.m_FigureCacheEntry.m_FigureSourceType,
 				                                              line_entry.m_LineScale * zoom_level,
 				                                              line_entry.m_FigureCacheEntry.m_Inverted);
+
+				int line_number = pair.Key;
+				RemoveFigure(line_number, line_entry);
+
 				if (s_FigureCache.TryGetValue(figure_cache_entry, out FigureCacheEntry stored_figure_cache_entry))
 				{
 					line_entry.m_FigureCacheEntry = stored_figure_cache_entry;
@@ -1957,7 +2093,7 @@ namespace EmbedFigure
 			{
 				StartTimer();
 			}
-#if TRACE
+#if TRACE_FUNCTIONS
 			LeaveFunction();
 #endif
 		}
@@ -1973,6 +2109,7 @@ namespace EmbedFigure
 			TRC_SD.Trace.WriteLine(message);
 		}
 
+#if TRACE_FUNCTIONS
 		internal static void EnterFunction([TRC_SRCS.CallerMemberName] string function_name = "")
 		{
 			TraceMsg("Enter: " + function_name);
@@ -1984,6 +2121,7 @@ namespace EmbedFigure
 			s_Indent.Value -= 2;
 			TraceMsg("Leave: " + function_name);
 		}
+#endif
 #endif
 
 		#endregion
@@ -2012,11 +2150,8 @@ namespace EmbedFigure
 		/// <param name="placement">The placement of the line with respect to y_position.</param>
 		public MVSTF.LineTransform GetLineTransform(MVSTF.ITextViewLine line, double y_position, MVSTE.ViewRelativePosition placement)
 		{
-#if TRACE
+#if TRACE_FUNCTIONS
 			EmbedFigureManager.EnterFunction();
-#endif
-#if TRACE_LINE_TRANSFORM_LINE_NUMBERS
-			EmbedFigureManager.TraceMsg("Transform line number: " + m_Manager.m_TextView.TextSnapshot.GetLineNumberFromPosition(line.Start.Position));
 #endif
 			MVSTF.LineTransform clt = line.LineTransform;
 			MVSTF.LineTransform dlt = line.DefaultLineTransform;
@@ -2031,10 +2166,33 @@ namespace EmbedFigure
 				}
 			}
 
-#if TRACE
+			if (0.0 < adornment_height)
+			{
+				m_Manager.m_LastReturnedLineHeights[line_number] = adornment_height;
+			}
+			else
+			{
+				m_Manager.m_LastReturnedLineHeights.Remove(line_number);
+			}
+
+#if TRACE_LINE_TRANSFORM_LINE_NUMBERS
+			if (clt.BottomSpace < dlt.BottomSpace + adornment_height)
+			{
+				EmbedFigureManager.TraceMsg("Transform line number: " + m_Manager.m_TextView.TextSnapshot.GetLineNumberFromPosition(line.Start.Position) + " height inc: " + dlt.BottomSpace + adornment_height);
+			}
+			else if (clt.BottomSpace > dlt.BottomSpace + adornment_height)
+			{
+				EmbedFigureManager.TraceMsg("Transform line number: " + m_Manager.m_TextView.TextSnapshot.GetLineNumberFromPosition(line.Start.Position) + " height dec: " + dlt.BottomSpace + adornment_height);
+			}
+			else
+			{
+				EmbedFigureManager.TraceMsg("Transform line number: " + m_Manager.m_TextView.TextSnapshot.GetLineNumberFromPosition(line.Start.Position) + " height equ: " + dlt.BottomSpace + adornment_height);
+			}
+
+#endif
+#if TRACE_FUNCTIONS
 			EmbedFigureManager.LeaveFunction();
 #endif
-
 			return new MVSTF.LineTransform(clt.TopSpace, dlt.BottomSpace + adornment_height, clt.VerticalScale);
 		}
 	}

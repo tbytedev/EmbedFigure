@@ -1,6 +1,6 @@
 ﻿/*
  * EmbedFigure - Visual Studio extension for embedding math figures into source code
- * Copyright(C) 2020 Tamas Kezdi
+ * Copyright(C) 2022 Tamas Kezdi
  *
  * This program is free software : you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -16,7 +16,6 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-using MVSLI = Microsoft.VisualStudio.Language.Intellisense;
 using MVST  = Microsoft.VisualStudio.Text;
 using MVSTT = Microsoft.VisualStudio.Text.Tagging;
 using MVSTE = Microsoft.VisualStudio.Text.Editor;
@@ -39,7 +38,7 @@ namespace EmbedFigure
 #pragma warning disable 169
 		/// <summary>
 		/// Defines the adornment layer for the adornment. This layer is ordered after the selection layer in the Z-order
-		/// Although it's not used directly, it's required when IWpfTextView.GetAdornmentLayer is called, and accessed via Export by the framework
+		/// Although it's not used directly, it's required when IWpfTextView.GetAdornmentLayer is called, and accessed via Export by MEF
 		/// </summary>
 		[MVSU.Name("EmbedFigureAdornmentLayer")]
 		[MVSU.Order(After = MVSTE.PredefinedAdornmentLayers.Selection, Before = MVSTE.PredefinedAdornmentLayers.Text)]

@@ -1,0 +1,12 @@
+<svg width="192" height="192" xmlns="http://www.w3.org/2000/svg">
+	<style>
+		path { stroke-linecap: round; fill-opacity: 0; }
+		.foreground { stroke: #424242; stroke-width:24; }
+		.outline { stroke: #F6F6F6; stroke-width:48; }
+	</style>
+	<defs>
+		<path id="graph" d="M 32,48 L 40,40 L 48,48 M 40,40 V 152 H 152 M 144,144 L 152,152 L 144,160 M 64,96 Q 96,32 128,120" />
+	</defs>
+	<use class="outline" href="#graph" />
+	<use class="foreground" href="#graph" />
+</svg>
