@@ -16,6 +16,10 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+#if TRACE
+//#define TRACE_FUNCTIONS
+#endif
+
 using MVS   = Microsoft.VisualStudio;
 using MVSS  = Microsoft.VisualStudio.Shell;
 using MVSSI = Microsoft.VisualStudio.Shell.Interop;
@@ -156,10 +160,16 @@ namespace EmbedFigure
 
 		private async STT.Task LoadOptionsAsync()
 		{
+#if TRACE_FUNCTIONS
+			Trace.EnterFunction();
+#endif
 			MVSSS.ShellSettingsManager settings_manager = await s_SettingsManager.GetValueAsync();
 			if (null == settings_manager)
 			{
 				ResetSettings();
+#if TRACE_FUNCTIONS
+				Trace.LeaveFunction();
+#endif
 				return;
 			}
 
@@ -167,6 +177,9 @@ namespace EmbedFigure
 			if (!settings_store.CollectionExists(c_CollectionName))
 			{
 				ResetSettings();
+#if TRACE_FUNCTIONS
+				Trace.LeaveFunction();
+#endif
 				return;
 			}
 
@@ -195,10 +208,16 @@ namespace EmbedFigure
 			{
 				m_PrefixChar = m_PrevPrefixChar = m_LastSavedPrefixChar = c_DefaultPrefixChar;
 			}
+#if TRACE_FUNCTIONS
+			Trace.LeaveFunction();
+#endif
 		}
 
 		private async STT.Task SaveOptionsAsync()
 		{
+#if TRACE_FUNCTIONS
+			Trace.EnterFunction();
+#endif
 			MVSSS.ShellSettingsManager settings_manager = await s_SettingsManager.GetValueAsync();
 			MVSSe.WritableSettingsStore writable_settings_store = null;
 			if (null != settings_manager)
@@ -257,6 +276,9 @@ namespace EmbedFigure
 			{
 				OptionsChanged?.Invoke(this, null);
 			}
+#if TRACE_FUNCTIONS
+			Trace.LeaveFunction();
+#endif
 		}
 
 		internal void LoadSettingsFromStorage()
@@ -266,10 +288,16 @@ namespace EmbedFigure
 
 		internal void LoadSettingsFromXml(MVSSI.IVsSettingsReader reader)
 		{
+#if TRACE_FUNCTIONS
+			Trace.EnterFunction();
+#endif
 			MVSS.ThreadHelper.JoinableTaskFactory.Run(async delegate
 			{
 				await MVSS.ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
 
+#if TRACE_FUNCTIONS
+				Trace.Message("Switched to Main LoadSettingsFromXml");
+#endif
 				bool options_changed = false;
 
 				if (MVS.VSConstants.S_OK == reader.ReadCategoryVersion(out int version_major, out int version_minor, out int version_build, out int version_revision))
@@ -299,7 +327,14 @@ namespace EmbedFigure
 				{
 					OptionsChanged?.Invoke(this, null);
 				}
+
+#if TRACE_FUNCTIONS
+				Trace.Message("Switch from Main LoadSettingsFromXml");
+#endif
 			});
+#if TRACE_FUNCTIONS
+			Trace.LeaveFunction();
+#endif
 		}
 
 		internal void SaveSettingsToStorage()
@@ -309,14 +344,26 @@ namespace EmbedFigure
 
 		internal void SaveSettingsToXml(MVSSI.IVsSettingsWriter writer)
 		{
+#if TRACE_FUNCTIONS
+			Trace.EnterFunction();
+#endif
 			MVSS.ThreadHelper.JoinableTaskFactory.Run(async delegate
 			{
 				await MVSS.ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
 
+#if TRACE_FUNCTIONS
+				Trace.Message("Switched to Main SaveSettingsToXml");
+#endif
 				writer.WriteCategoryVersion(c_Version_Major, c_Version_Minor, c_Version_Build, c_Version_Revision);
 				writer.WriteSettingLong("UpdateDelay", m_UpdateDelay);
 				writer.WriteSettingString("PrefixChar", m_PrefixChar.ToString());
+#if TRACE_FUNCTIONS
+				Trace.Message("Switch from Main SaveSettingsToXml");
+#endif
 			});
+#if TRACE_FUNCTIONS
+			Trace.LeaveFunction();
+#endif
 		}
 
 		internal void ResetSettings()
@@ -443,28 +490,58 @@ namespace EmbedFigure
 
 		public override void LoadSettingsFromStorage()
 		{
+#if TRACE_FUNCTIONS
+			Trace.EnterFunction();
+#endif
 			m_Options.LoadSettingsFromStorage();
+#if TRACE_FUNCTIONS
+			Trace.LeaveFunction();
+#endif
 		}
 
 		public override void LoadSettingsFromXml(MVSSI.IVsSettingsReader reader)
 		{
+#if TRACE_FUNCTIONS
+			Trace.EnterFunction();
+#endif
 			m_Options.LoadSettingsFromXml(reader);
+#if TRACE_FUNCTIONS
+			Trace.LeaveFunction();
+#endif
 		}
 
 
 		public override void SaveSettingsToStorage()
 		{
+#if TRACE_FUNCTIONS
+			Trace.EnterFunction();
+#endif
 			m_Options.SaveSettingsToStorage();
+#if TRACE_FUNCTIONS
+			Trace.LeaveFunction();
+#endif
 		}
 
 		public override void SaveSettingsToXml(MVSSI.IVsSettingsWriter writer)
 		{
+#if TRACE_FUNCTIONS
+			Trace.EnterFunction();
+#endif
 			m_Options.SaveSettingsToXml(writer);
+#if TRACE_FUNCTIONS
+			Trace.LeaveFunction();
+#endif
 		}
 
 		public override void ResetSettings()
 		{
+#if TRACE_FUNCTIONS
+			Trace.EnterFunction();
+#endif
 			m_Options.ResetSettings();
+#if TRACE_FUNCTIONS
+			Trace.LeaveFunction();
+#endif
 		}
 	}
 

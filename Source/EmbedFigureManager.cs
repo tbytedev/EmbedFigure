@@ -16,16 +16,13 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-//#undef DEBUG
-#undef TRACE
-
 #if TRACE
-#define TRACE_FUNCTIONS
-#define TRACE_LAYOUT_CHANGED
-#define TRACE_LAYOUT_SPAN_CHANGED
-#define TRACE_ADORNMENT_ADD_LINE_NUMBER
-#define TRACE_ADORNMENT_REMOVE_LINE_NUMBER
-#define TRACE_LINE_TRANSFORM_LINE_NUMBERS
+//#define TRACE_FUNCTIONS
+//#define TRACE_LAYOUT_CHANGED
+//#define TRACE_LAYOUT_SPAN_CHANGED
+//#define TRACE_ADORNMENT_ADD_LINE_NUMBER
+//#define TRACE_ADORNMENT_REMOVE_LINE_NUMBER
+//#define TRACE_LINE_TRANSFORM_LINE_NUMBERS
 #endif
 
 #define HANDLE_FOCUS
@@ -51,15 +48,6 @@ using SW    = System.Windows;
 using SWC   = System.Windows.Controls;
 using SWM   = System.Windows.Media;
 using SWMI  = System.Windows.Media.Imaging;
-
-#if TRACE || DEBUG
-using TRC_SD   = System.Diagnostics;
-#endif
-
-#if TRACE
-using TRC_ST   = System.Threading;
-using TRC_SRCS = System.Runtime.CompilerServices;
-#endif
 
 namespace EmbedFigure
 {
@@ -366,10 +354,6 @@ namespace EmbedFigure
 		private static readonly VSEvents s_VSEvents;
 #endif
 
-#if TRACE
-		private static readonly TRC_ST.ThreadLocal<string> s_ThreadName = new TRC_ST.ThreadLocal<string>(() => { return "Thread " + (10 > TRC_ST.Thread.CurrentThread.ManagedThreadId ? " " + TRC_ST.Thread.CurrentThread.ManagedThreadId : TRC_ST.Thread.CurrentThread.ManagedThreadId.ToString()); });
-		private static readonly TRC_ST.ThreadLocal<int>    s_Indent     = new TRC_ST.ThreadLocal<int>   (() => { return 0; });
-#endif
 		internal static uint s_UpdateID = 0;
 
 		private static bool s_CacheCanHaveUnreferencedEntries = false;
@@ -569,7 +553,7 @@ namespace EmbedFigure
 		private static void RenderFigureTask(object context)
 		{
 #if TRACE_FUNCTIONS
-			EnterFunction();
+			Trace.EnterFunction();
 #endif
 			var figure_cache_entry = (FigureCacheEntry)context;
 
@@ -703,16 +687,16 @@ namespace EmbedFigure
 					}
 				}
 
-#if TRACE
-				TraceMsg("Switch to Main RenderFigureTask");
+#if TRACE_FUNCTIONS
+				Trace.Message("Switch to Main RenderFigureTask");
 #endif
 				// UI related objects (System.Windows.Media.Imaging.BitmapSource) can be created and used only on Main thread
 				MVSS.ThreadHelper.JoinableTaskFactory.Run(async delegate
 				{
 					await MVSS.ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
 
-#if TRACE
-					TraceMsg("Switched to Main RenderFigureTask");
+#if TRACE_FUNCTIONS
+					Trace.Message("Switched to Main RenderFigureTask");
 #endif
 					FigureCacheData figure_cache_data = figure_cache_entry.m_FigureCacheData;
 					if (0 == figure_cache_data.m_LineIDs.Count)
@@ -732,8 +716,8 @@ namespace EmbedFigure
 
 						manager.AddFigure(line_number, line_entry, figure_cache_data);
 					}
-#if TRACE
-					TraceMsg("Switch from Main RenderFigureTask");
+#if TRACE_FUNCTIONS
+					Trace.Message("Switch from Main RenderFigureTask");
 #endif
 				});
 			}
@@ -743,8 +727,8 @@ namespace EmbedFigure
 			}
 			finally
 			{
-#if TRACE
-				TraceMsg("Switched from Main RenderFigureTask");
+#if TRACE_FUNCTIONS
+				Trace.Message("Switched from Main RenderFigureTask");
 #endif
 				bitmap?.Dispose();
 				bitmap_temp?.Dispose();
@@ -753,7 +737,7 @@ namespace EmbedFigure
 			}
 
 #if TRACE_FUNCTIONS
-			LeaveFunction();
+			Trace.LeaveFunction();
 #endif
 		}
 
@@ -854,8 +838,8 @@ namespace EmbedFigure
 		private static void TimerElapsed(int timer_start_id)
 		{
 #if TRACE_FUNCTIONS
-			EnterFunction();
-			TraceMsg("Switch to Main TimerElapsed");
+			Trace.EnterFunction();
+			Trace.Message("Switch to Main TimerElapsed");
 #endif
 			MVSS.ThreadHelper.JoinableTaskFactory.Run(async delegate
 			{
@@ -865,20 +849,20 @@ namespace EmbedFigure
 					return;
 				}
 
-#if TRACE
-				TraceMsg("Switched to Main TimerElapsed");
+#if TRACE_FUNCTIONS
+				Trace.Message("Switched to Main TimerElapsed");
 #endif
 				ProcessLineRenderQueue();
 				CacheCleanup();
-#if TRACE
-				TraceMsg("Switch from Main TimerElapsed");
+#if TRACE_FUNCTIONS
+				Trace.Message("Switch from Main TimerElapsed");
 #endif
 			});
-#if TRACE
-			TraceMsg("Switched from Main TimerElapsed");
+#if TRACE_FUNCTIONS
+			Trace.Message("Switched from Main TimerElapsed");
 #endif
 #if TRACE_FUNCTIONS
-			LeaveFunction();
+			Trace.LeaveFunction();
 #endif
 		}
 
@@ -965,7 +949,7 @@ namespace EmbedFigure
 		private void AddAdornment(MVST.SnapshotSpan snapshot_span, int line_number, LineEntry line_entry)
 		{
 #if TRACE_FUNCTIONS
-			EnterFunction();
+			Trace.EnterFunction();
 #endif
 			SWM.Geometry geometry = m_TextView.TextViewLines.GetMarkerGeometry(snapshot_span);
 			if (null != geometry)
@@ -984,11 +968,11 @@ namespace EmbedFigure
 				m_AdornmentLayer.AddAdornment(MVSTE.AdornmentPositioningBehavior.TextRelative, snapshot_span, line_number, image, OnAdornmentRemoved);
 
 #if TRACE_ADORNMENT_ADD_LINE_NUMBER
-				TraceMsg("Adornment add line number: " + line_number);
+				Trace.Message("Adornment add line number: " + line_number);
 #endif
 			}
 #if TRACE_FUNCTIONS
-			LeaveFunction();
+			Trace.LeaveFunction();
 #endif
 		}
 
@@ -1637,15 +1621,15 @@ namespace EmbedFigure
 		private void OnAdornmentRemoved(object tag, SW.UIElement element)
 		{
 #if TRACE_FUNCTIONS
-			EnterFunction();
+			Trace.EnterFunction();
 #endif
 			int line_number = (int)tag;
 			m_LineEntries[line_number].m_Added = false;
 #if TRACE_ADORNMENT_REMOVE_LINE_NUMBER
-			TraceMsg("Adornment remove line number: " + line_number);
+			Trace.Message("Adornment remove line number: " + line_number);
 #endif
 #if TRACE_FUNCTIONS
-			LeaveFunction();
+			Trace.LeaveFunction();
 #endif
 		}
 
@@ -1657,7 +1641,7 @@ namespace EmbedFigure
 				return;
 			}
 #if TRACE_FUNCTIONS
-			EnterFunction();
+			Trace.EnterFunction();
 #endif
 			m_ColorTheme = color_theme;
 
@@ -1731,7 +1715,7 @@ namespace EmbedFigure
 				StartTimer();
 			}
 #if TRACE_FUNCTIONS
-			LeaveFunction();
+			Trace.LeaveFunction();
 #endif
 		}
 
@@ -1745,7 +1729,7 @@ namespace EmbedFigure
 		private void OnGotFocus(object sender, S.EventArgs e)
 		{
 #if TRACE_FUNCTIONS
-			EnterFunction();
+			Trace.EnterFunction();
 #endif
 			StopTimer();
 
@@ -1762,7 +1746,7 @@ namespace EmbedFigure
 
 			ProcessLineRenderQueue();
 #if TRACE_FUNCTIONS
-			LeaveFunction();
+			Trace.LeaveFunction();
 #endif
 		}
 #endif
@@ -1787,7 +1771,7 @@ namespace EmbedFigure
 			}
 
 #if TRACE_FUNCTIONS
-			EnterFunction();
+			Trace.EnterFunction();
 #endif
 			StopTimer();
 
@@ -1796,50 +1780,50 @@ namespace EmbedFigure
 #if TRACE_LAYOUT_CHANGED
 			if (0 < e.NewOrReformattedLines.Count)
 			{
-				TraceMsg("--------");
-				TraceMsg("NewOrReformattedLines.Count: " + e.NewOrReformattedLines.Count);
-				TraceMsg("--------");
+				Trace.Message("--------");
+				Trace.Message("NewOrReformattedLines.Count: " + e.NewOrReformattedLines.Count);
+				Trace.Message("--------");
 				foreach (MVSTF.ITextViewLine line in e.NewOrReformattedLines)
 				{
 					int line_number = text_snapshot.GetLineNumberFromPosition(line.Start);
-					TraceMsg("Line " + line_number + " (" + line.Start.Position + "-" + line.End.Position + "): " + text_snapshot.GetText(line.Extent.Span));
+					Trace.Message("Line " + line_number + " (" + line.Start.Position + "-" + line.End.Position + "): " + text_snapshot.GetText(line.Extent.Span));
 				}
 			}
 
 			if (0 < e.TranslatedLines.Count)
 			{
-				TraceMsg("--------");
-				TraceMsg("TranslatedLines.Count: " + e.TranslatedLines.Count);
-				TraceMsg("--------");
+				Trace.Message("--------");
+				Trace.Message("TranslatedLines.Count: " + e.TranslatedLines.Count);
+				Trace.Message("--------");
 				foreach (MVSTF.ITextViewLine line in e.TranslatedLines)
 				{
 					int line_number = text_snapshot.GetLineNumberFromPosition(line.Start);
-					TraceMsg("Line " + line_number + " (" + line.Start.Position + "-" + line.End.Position + "): " + text_snapshot.GetText(line.Extent.Span));
+					Trace.Message("Line " + line_number + " (" + line.Start.Position + "-" + line.End.Position + "): " + text_snapshot.GetText(line.Extent.Span));
 				}
 			}
 
 #if TRACE_LAYOUT_SPAN_CHANGED
 			if (0 < e.NewOrReformattedSpans.Count)
 			{
-				TraceMsg("--------");
-				TraceMsg("NewOrReformattedSpans.Count: " + e.NewOrReformattedSpans.Count);
-				TraceMsg("--------");
+				Trace.Message("--------");
+				Trace.Message("NewOrReformattedSpans.Count: " + e.NewOrReformattedSpans.Count);
+				Trace.Message("--------");
 				foreach (MVST.SnapshotSpan span in e.NewOrReformattedSpans)
 				{
 					int line_number = text_snapshot.GetLineNumberFromPosition(span.Start);
-					TraceMsg("Span " + line_number + " (" + span.Start.Position + "-" + span.End.Position + "): " + text_snapshot.GetText(span.Span));
+					Trace.Message("Span " + line_number + " (" + span.Start.Position + "-" + span.End.Position + "): " + text_snapshot.GetText(span.Span));
 				}
 			}
 
 			if (0 < e.TranslatedSpans.Count)
 			{
-				TraceMsg("--------");
-				TraceMsg("TranslatedSpans.Count: " + e.TranslatedSpans.Count);
-				TraceMsg("--------");
+				Trace.Message("--------");
+				Trace.Message("TranslatedSpans.Count: " + e.TranslatedSpans.Count);
+				Trace.Message("--------");
 				foreach (MVST.SnapshotSpan span in e.TranslatedSpans)
 				{
 					int line_number = text_snapshot.GetLineNumberFromPosition(span.Start);
-					TraceMsg("Span " + line_number + " (" + span.Start.Position + "-" + span.End.Position + "): " + text_snapshot.GetText(span.Span));
+					Trace.Message("Span " + line_number + " (" + span.Start.Position + "-" + span.End.Position + "): " + text_snapshot.GetText(span.Span));
 				}
 			}
 #endif
@@ -1863,7 +1847,7 @@ namespace EmbedFigure
 			{
 				// There were line insertion or deletion, track line movements
 #if DEBUG
-				TRC_SD.Debug.Assert(e.OldSnapshot.Version.Next == e.NewSnapshot.Version);
+				Debug.Assert(e.OldSnapshot.Version.Next == e.NewSnapshot.Version);
 #endif
 				first_line_number_to_add_adornment = 0;
 				last_line_number_to_add_adornment = int.MaxValue;
@@ -1983,7 +1967,7 @@ namespace EmbedFigure
 				StartTimer();
 			}
 #if TRACE_FUNCTIONS
-			LeaveFunction();
+			Trace.LeaveFunction();
 #endif
 		}
 
@@ -2032,7 +2016,7 @@ namespace EmbedFigure
 		private void OnZoomLevelChanged(object sender, MVSTE.ZoomLevelChangedEventArgs e)
 		{
 #if TRACE_FUNCTIONS
-			EnterFunction();
+			Trace.EnterFunction();
 #endif
 			StopTimer();
 
@@ -2094,35 +2078,9 @@ namespace EmbedFigure
 				StartTimer();
 			}
 #if TRACE_FUNCTIONS
-			LeaveFunction();
+			Trace.LeaveFunction();
 #endif
 		}
-
-#if TRACE
-		internal static void TraceMsg(string message)
-		{
-			TRC_SD.Trace.Write("==== " + s_ThreadName.Value + " ");
-			for (int i = 0; i < s_Indent.Value; ++i)
-			{
-				TRC_SD.Trace.Write(" ");
-			}
-			TRC_SD.Trace.WriteLine(message);
-		}
-
-#if TRACE_FUNCTIONS
-		internal static void EnterFunction([TRC_SRCS.CallerMemberName] string function_name = "")
-		{
-			TraceMsg("Enter: " + function_name);
-			s_Indent.Value += 2;
-		}
-
-		internal static void LeaveFunction([TRC_SRCS.CallerMemberName] string function_name = "")
-		{
-			s_Indent.Value -= 2;
-			TraceMsg("Leave: " + function_name);
-		}
-#endif
-#endif
 
 		#endregion
 	}
@@ -2151,7 +2109,7 @@ namespace EmbedFigure
 		public MVSTF.LineTransform GetLineTransform(MVSTF.ITextViewLine line, double y_position, MVSTE.ViewRelativePosition placement)
 		{
 #if TRACE_FUNCTIONS
-			EmbedFigureManager.EnterFunction();
+			Trace.EnterFunction();
 #endif
 			MVSTF.LineTransform clt = line.LineTransform;
 			MVSTF.LineTransform dlt = line.DefaultLineTransform;
@@ -2178,20 +2136,20 @@ namespace EmbedFigure
 #if TRACE_LINE_TRANSFORM_LINE_NUMBERS
 			if (clt.BottomSpace < dlt.BottomSpace + adornment_height)
 			{
-				EmbedFigureManager.TraceMsg("Transform line number: " + m_Manager.m_TextView.TextSnapshot.GetLineNumberFromPosition(line.Start.Position) + " height inc: " + dlt.BottomSpace + adornment_height);
+				Trace.Message("Transform line number: " + m_Manager.m_TextView.TextSnapshot.GetLineNumberFromPosition(line.Start.Position) + " height inc: " + dlt.BottomSpace + adornment_height);
 			}
 			else if (clt.BottomSpace > dlt.BottomSpace + adornment_height)
 			{
-				EmbedFigureManager.TraceMsg("Transform line number: " + m_Manager.m_TextView.TextSnapshot.GetLineNumberFromPosition(line.Start.Position) + " height dec: " + dlt.BottomSpace + adornment_height);
+				Trace.Message("Transform line number: " + m_Manager.m_TextView.TextSnapshot.GetLineNumberFromPosition(line.Start.Position) + " height dec: " + dlt.BottomSpace + adornment_height);
 			}
 			else
 			{
-				EmbedFigureManager.TraceMsg("Transform line number: " + m_Manager.m_TextView.TextSnapshot.GetLineNumberFromPosition(line.Start.Position) + " height equ: " + dlt.BottomSpace + adornment_height);
+				Trace.Message("Transform line number: " + m_Manager.m_TextView.TextSnapshot.GetLineNumberFromPosition(line.Start.Position) + " height equ: " + dlt.BottomSpace + adornment_height);
 			}
 
 #endif
 #if TRACE_FUNCTIONS
-			EmbedFigureManager.LeaveFunction();
+			Trace.LeaveFunction();
 #endif
 			return new MVSTF.LineTransform(clt.TopSpace, dlt.BottomSpace + adornment_height, clt.VerticalScale);
 		}
