@@ -36,13 +36,22 @@ using STT   = System.Threading.Tasks;
 
 namespace EmbedFigure
 {
+	public enum Align
+	{
+		Left,
+		Indentation,
+		Center,
+		Right
+	}
+
 	[SRIS.Guid(c_OptionsGuidString)]
 	internal class EmbedFigureOptions
 	{
 		#region Constants
 
-		private const int c_DefaultUpdateDelay = 1500;
+		private const Align c_DefaultAlignment = Align.Indentation;
 		private const char c_DefaultPrefixChar = '@';
+		private const int c_DefaultUpdateDelay = 1500;
 		/// <summary>
 		/// Registry key name where the setting are stored.
 		/// </summary>
@@ -116,14 +125,17 @@ namespace EmbedFigure
 		#region Member variables
 
 		// Current values of settings
-		private int m_UpdateDelay = c_DefaultUpdateDelay;
+		private Align m_Alignment = c_DefaultAlignment;
 		private char m_PrefixChar = c_DefaultPrefixChar;
+		private int m_UpdateDelay = c_DefaultUpdateDelay;
 
-		private int m_LastSavedUpdateDelay = c_DefaultUpdateDelay;
+		private Align m_LastSavedAlignment = c_DefaultAlignment;
 		private char m_LastSavedPrefixChar = c_DefaultPrefixChar;
+		private int m_LastSavedUpdateDelay = c_DefaultUpdateDelay;
 
-		internal int m_PrevUpdateDelay = c_DefaultUpdateDelay;
+		internal Align m_PrevAlignment = c_DefaultAlignment;
 		internal char m_PrevPrefixChar = c_DefaultPrefixChar;
+		internal int m_PrevUpdateDelay = c_DefaultUpdateDelay;
 
 		#endregion
 
@@ -136,22 +148,35 @@ namespace EmbedFigure
 		#region Member properties
 
 		[SCM.Category("General")]
-		[SCM.Description("Update figures after this much time has elapsed since the last change in ms.")]
-		[SCM.DisplayName("Update delay")]
-		public int UpdateDelay
+		[SCM.Description("Specifies where to align the figure.")]
+		[SCM.DefaultValue(c_DefaultAlignment)]
+		[SCM.DisplayName("Alignment")]
+		[SCM.TypeConverter(typeof(SCM.EnumConverter))]
+		public Align Alignment
 		{
-			get => m_UpdateDelay;
-			set => m_UpdateDelay = value;
+			get => m_Alignment;
+			set => m_Alignment = value;
 		}
 
 		[SCM.Category("General")]
 		[SCM.Description("The character before EmbedFigure.")]
+		[SCM.DefaultValue(c_DefaultPrefixChar)]
 		[SCM.DisplayName("Prefix character")]
 		[SCM.TypeConverter(typeof(PrefixCharTypeConverter))]
 		public char PrefixChar
 		{
 			get => m_PrefixChar;
 			set => m_PrefixChar = value;
+		}
+
+		[SCM.Category("General")]
+		[SCM.Description("Update figures after this much time has elapsed since the last change in ms.")]
+		[SCM.DefaultValue(c_DefaultUpdateDelay)]
+		[SCM.DisplayName("Update delay")]
+		public int UpdateDelay
+		{
+			get => m_UpdateDelay;
+			set => m_UpdateDelay = value;
 		}
 
 		#endregion
@@ -185,11 +210,19 @@ namespace EmbedFigure
 
 			try
 			{
-				m_UpdateDelay = m_PrevUpdateDelay = m_LastSavedUpdateDelay = settings_store.GetInt32(c_CollectionName, "UpdateDelay");
+				string alignment_string = settings_store.GetString(c_CollectionName, "Alignment");
+				if (null != alignment_string && S.Enum.TryParse(alignment_string, out Align alignment))
+				{
+					m_Alignment = m_PrevAlignment = m_LastSavedAlignment = alignment;
+				}
+				else
+				{
+					m_Alignment = m_PrevAlignment = m_LastSavedAlignment = c_DefaultAlignment;
+				}
 			}
 			catch
 			{
-				m_UpdateDelay = m_PrevUpdateDelay = m_LastSavedUpdateDelay = c_DefaultUpdateDelay;
+				m_Alignment = m_PrevAlignment = m_LastSavedAlignment = c_DefaultAlignment;
 			}
 
 			try
@@ -208,6 +241,16 @@ namespace EmbedFigure
 			{
 				m_PrefixChar = m_PrevPrefixChar = m_LastSavedPrefixChar = c_DefaultPrefixChar;
 			}
+
+			try
+			{
+				m_UpdateDelay = m_PrevUpdateDelay = m_LastSavedUpdateDelay = settings_store.GetInt32(c_CollectionName, "UpdateDelay");
+			}
+			catch
+			{
+				m_UpdateDelay = m_PrevUpdateDelay = m_LastSavedUpdateDelay = c_DefaultUpdateDelay;
+			}
+
 #if TRACE_FUNCTIONS
 			Trace.LeaveFunction();
 #endif
@@ -238,16 +281,16 @@ namespace EmbedFigure
 
 			bool options_changed = false;
 
-			m_PrevUpdateDelay = m_LastSavedUpdateDelay;
-			if (m_UpdateDelay != m_LastSavedUpdateDelay)
+			m_PrevAlignment = m_LastSavedAlignment;
+			if (m_Alignment != m_LastSavedAlignment)
 			{
 				options_changed = true;
-				m_LastSavedUpdateDelay = m_UpdateDelay;
+				m_LastSavedAlignment = m_Alignment;
 				if (null != writable_settings_store)
 				{
 					try
 					{
-						writable_settings_store.SetInt32(c_CollectionName, "UpdateDelay", m_LastSavedUpdateDelay);
+						writable_settings_store.SetString(c_CollectionName, "Alignment", m_Alignment.ToString());
 					}
 					catch
 					{
@@ -265,6 +308,23 @@ namespace EmbedFigure
 					try
 					{
 						writable_settings_store.SetString(c_CollectionName, "PrefixChar", m_LastSavedPrefixChar.ToString());
+					}
+					catch
+					{
+					}
+				}
+			}
+
+			m_PrevUpdateDelay = m_LastSavedUpdateDelay;
+			if (m_UpdateDelay != m_LastSavedUpdateDelay)
+			{
+				options_changed = true;
+				m_LastSavedUpdateDelay = m_UpdateDelay;
+				if (null != writable_settings_store)
+				{
+					try
+					{
+						writable_settings_store.SetInt32(c_CollectionName, "UpdateDelay", m_LastSavedUpdateDelay);
 					}
 					catch
 					{
@@ -304,19 +364,29 @@ namespace EmbedFigure
 				{
 					if (c_Version_Major == version_major && c_Version_Minor == version_minor && c_Version_Build == version_build && c_Version_Revision == version_revision)
 					{
-						if (MVS.VSConstants.S_OK == reader.ReadSettingLong("UpdateDelay", out int update_delay))
+						if (MVS.VSConstants.S_OK == reader.ReadSettingString("Alignment", out string alignment_string))
 						{
-							if (update_delay != m_UpdateDelay)
+							if (null != alignment_string && S.Enum.TryParse(alignment_string, out Align alignment))
 							{
-								m_UpdateDelay = update_delay;
+								m_Alignment = alignment;
 								options_changed = true;
 							}
 						}
+
 						if (MVS.VSConstants.S_OK == reader.ReadSettingString("PrefixChar", out string prefix_char))
 						{
 							if (null != prefix_char && 1 == prefix_char.Length && IsValidPrefixChar(prefix_char[0]) && prefix_char[0] != m_PrefixChar)
 							{
 								m_PrefixChar = prefix_char[0];
+								options_changed = true;
+							}
+						}
+
+						if (MVS.VSConstants.S_OK == reader.ReadSettingLong("UpdateDelay", out int update_delay))
+						{
+							if (update_delay != m_UpdateDelay)
+							{
+								m_UpdateDelay = update_delay;
 								options_changed = true;
 							}
 						}
@@ -355,8 +425,9 @@ namespace EmbedFigure
 				Trace.Message("Switched to Main SaveSettingsToXml");
 #endif
 				writer.WriteCategoryVersion(c_Version_Major, c_Version_Minor, c_Version_Build, c_Version_Revision);
-				writer.WriteSettingLong("UpdateDelay", m_UpdateDelay);
+				writer.WriteSettingString("Alignment", m_Alignment.ToString()); 
 				writer.WriteSettingString("PrefixChar", m_PrefixChar.ToString());
+				writer.WriteSettingLong("UpdateDelay", m_UpdateDelay);
 #if TRACE_FUNCTIONS
 				Trace.Message("Switch from Main SaveSettingsToXml");
 #endif

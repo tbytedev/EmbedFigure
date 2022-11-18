@@ -315,7 +315,7 @@ namespace EmbedFigure
 		internal static readonly SCG.List<EmbedFigureManager> s_Managers = new SCG.List<EmbedFigureManager>();
 
 		/// <summary>
-		/// Instruction to embed a figure to the source. This is prefixed by a #
+		/// Instruction to embed a figure to the source. This is prefixed by a # or @ prefix char
 		/// </summary>
 		private static readonly char[] s_InstructionCharArray = { 'E', 'm', 'b', 'e', 'd', 'F', 'i', 'g', 'u', 'r', 'e' };
 
@@ -946,26 +946,58 @@ namespace EmbedFigure
 			s_Options.OptionsChanged          += OnOptionsChanged;
 		}
 
-		private void AddAdornment(MVST.SnapshotSpan snapshot_span, int line_number, LineEntry line_entry)
+		private void AddAdornment(MVST.SnapshotSpan line_snapshot_span, int line_number, LineEntry line_entry)
 		{
 #if TRACE_FUNCTIONS
 			Trace.EnterFunction();
 #endif
-			SWM.Geometry geometry = m_TextView.TextViewLines.GetMarkerGeometry(snapshot_span);
+			SWM.Geometry geometry = null;
+			if (Align.Indentation == s_Options.Alignment)
+			{
+				string line_string = line_snapshot_span.GetText();
+				int i = 0;
+				while (char.IsWhiteSpace(line_string[i]) && i < line_snapshot_span.Length)
+				{
+					++i;
+				}
+				MVST.SnapshotSpan indented_snapshot_span = new MVST.SnapshotSpan(line_snapshot_span.Start + i, line_snapshot_span.End);
+				if (0 < indented_snapshot_span.Length)
+				{
+					geometry = m_TextView.TextViewLines.GetMarkerGeometry(indented_snapshot_span);
+				}
+				else
+				{
+					geometry = m_TextView.TextViewLines.GetMarkerGeometry(line_snapshot_span);
+				}
+			}
+			else
+			{
+				geometry = m_TextView.TextViewLines.GetMarkerGeometry(line_snapshot_span);
+			}
 			if (null != geometry)
 			{
 				var image = new SWC.Image
 				{
 					Source = line_entry.m_Figure.m_BitmapSource,
-					Height = line_entry.m_Figure.m_Height * line_entry.m_LineScale
 				};
 
-				SWC.Canvas.SetLeft(image, geometry.Bounds.Left);
+				if (Align.Center == s_Options.Alignment)
+				{
+					SWC.Canvas.SetLeft(image, 0.5 * (m_TextView.ViewportWidth - line_entry.m_Figure.m_BitmapSource.Width));
+				}
+				else if (Align.Right == s_Options.Alignment)
+				{
+					SWC.Canvas.SetLeft(image, m_TextView.ViewportWidth - line_entry.m_Figure.m_BitmapSource.Width);
+				}
+				else
+				{
+					SWC.Canvas.SetLeft(image, geometry.Bounds.Left);
+				}
 				SWC.Canvas.SetTop(image, geometry.Bounds.Bottom);
 
 				line_entry.m_Added = true;
 
-				m_AdornmentLayer.AddAdornment(MVSTE.AdornmentPositioningBehavior.TextRelative, snapshot_span, line_number, image, OnAdornmentRemoved);
+				m_AdornmentLayer.AddAdornment(MVSTE.AdornmentPositioningBehavior.TextRelative, line_snapshot_span, line_number, image, OnAdornmentRemoved);
 
 #if TRACE_ADORNMENT_ADD_LINE_NUMBER
 				Trace.Message("Adornment add line number: " + line_number);
