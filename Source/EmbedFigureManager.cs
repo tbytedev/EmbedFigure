@@ -77,23 +77,14 @@ namespace EmbedFigure
 	/// <summary>
 	/// Contains the rendered figure, that is ready to add to the <see cref="MVSTE.IAdornmentLayer">IAdornmentLayer</see>
 	/// </summary>
-	internal class Figure
-	{
-		internal readonly SWMI.BitmapSource m_BitmapSource;
-		internal readonly double m_Height;
-
-		internal Figure(SWMI.BitmapSource bitmap_source, double height)
-		{
-			m_BitmapSource = bitmap_source;
-			m_Height = height;
-		}
-	}
-
 	internal class FigureCacheData
 	{
+		/// <summary>
+		/// Set of lines where this figure cache data is referenced
+		/// </summary>
 		internal readonly SCG.HashSet<LineID> m_LineIDs;
 
-		internal Figure m_Figure;
+		internal SWMI.BitmapSource m_FigureBitmapSource;
 		internal uint m_UpdateID = uint.MaxValue;
 		internal S.DateTime m_LastWriteTimeUtc = S.DateTime.MinValue;
 
@@ -116,11 +107,29 @@ namespace EmbedFigure
 
 	internal class FigureCacheEntry
 	{
+		/// <summary>
+		/// This can be a filename where the figure data is stored, or this string can contain the data itself.
+		/// </summary>
 		internal readonly string m_FigureSourceString;
+		/// <summary>
+		/// Type of the source.
+		/// </summary>
 		internal readonly FigureSourceType m_FigureSourceType;
+		/// <summary>
+		/// Stores how much the figure is scaled compared to its default size.
+		/// </summary>
+		/// <remarks>
+		/// It's the product of the document and the line scale. The default size is how the <see cref="m_FigureSourceString"/> would be rendered on its own without any modification.
+		/// </remarks>
 		internal readonly double m_FigureScale;
+		/// <summary>
+		/// Stores if the brightness is inverted.
+		/// </summary>
 		internal readonly bool m_Inverted;
 
+		/// <summary>
+		/// Stores the figure cache data
+		/// </summary>
 		internal FigureCacheData m_FigureCacheData;
 
 		internal FigureCacheEntry(string figure_source_string, FigureSourceType figure_source_type, double figure_scale, bool inverted)
@@ -173,7 +182,6 @@ namespace EmbedFigure
 			hashCode = hashCode * -1521134295 + m_Inverted.GetHashCode();
 			return hashCode;
 		}
-
 	}
 
 	internal readonly struct FigureRenderQueueEntry
@@ -202,13 +210,6 @@ namespace EmbedFigure
 		/// It's set to null if there's an error in this line.
 		/// </remarks>
 		internal FigureCacheEntry m_FigureCacheEntry;
-		/// <summary>
-		/// Stores data about the rendered figure
-		/// </summary>
-		/// <remarks>
-		/// This is null, if the figure is not rendered yet. After the rendering is finished it's set to the proper value
-		/// </remarks>
-		internal Figure m_Figure;
 		/// <summary>
 		/// It there's an error in this line it contains the error message, otherwise it's null.
 		/// </summary>
@@ -705,8 +706,7 @@ namespace EmbedFigure
 						return;
 					}
 
-					SWMI.BitmapSource bitmap_source = SWMI.BitmapSource.Create(bitmap_width, bitmap_height, 96, 96, SWM.PixelFormats.Bgra32, null, pixels, bitmap_stride);
-					figure_cache_data.m_Figure = new Figure(bitmap_source, image_height);
+					figure_cache_data.m_FigureBitmapSource = SWMI.BitmapSource.Create(bitmap_width, bitmap_height, 96, 96, SWM.PixelFormats.Bgra32, null, pixels, bitmap_stride);
 
 					foreach (LineID line_id in figure_cache_data.m_LineIDs)
 					{
@@ -760,7 +760,7 @@ namespace EmbedFigure
 				if (FigureSourceType.TexString == figure_cache_entry.m_FigureSourceType)
 				{
 					// Check if this figure is already rendered
-					if (null != figure_cache_data.m_Figure)
+					if (null != figure_cache_data.m_FigureBitmapSource)
 					{
 						continue;
 					}
@@ -803,7 +803,7 @@ namespace EmbedFigure
 
 		private static void InvalidateCache(FigureCacheData figure_cache_data)
 		{
-			if (null != figure_cache_data.m_Figure)
+			if (null != figure_cache_data.m_FigureBitmapSource)
 			{
 				foreach (LineID line_id in figure_cache_data.m_LineIDs)
 				{
@@ -814,9 +814,8 @@ namespace EmbedFigure
 					{
 						manager.m_AdornmentLayer.RemoveAdornmentsByTag(line_number);
 					}
-					line_entry.m_Figure = null;
 				}
-				figure_cache_data.m_Figure = null;
+				figure_cache_data.m_FigureBitmapSource = null;
 				figure_cache_data.m_LastWriteTimeUtc = S.DateTime.MinValue;
 			}
 		}
@@ -976,18 +975,19 @@ namespace EmbedFigure
 			}
 			if (null != geometry)
 			{
+				SWMI.BitmapSource figure_bitmap_source = line_entry.m_FigureCacheEntry.m_FigureCacheData.m_FigureBitmapSource;
 				var image = new SWC.Image
 				{
-					Source = line_entry.m_Figure.m_BitmapSource,
+					Source = figure_bitmap_source
 				};
 
 				if (Align.Center == s_Options.Alignment)
 				{
-					SWC.Canvas.SetLeft(image, 0.5 * (m_TextView.ViewportWidth - line_entry.m_Figure.m_BitmapSource.Width));
+					SWC.Canvas.SetLeft(image, 0.5 * (m_TextView.ViewportWidth - figure_bitmap_source.Width));
 				}
 				else if (Align.Right == s_Options.Alignment)
 				{
-					SWC.Canvas.SetLeft(image, m_TextView.ViewportWidth - line_entry.m_Figure.m_BitmapSource.Width);
+					SWC.Canvas.SetLeft(image, m_TextView.ViewportWidth - figure_bitmap_source.Width);
 				}
 				else
 				{
@@ -1040,7 +1040,7 @@ namespace EmbedFigure
 				}
 
 				LineEntry line_entry = pair.Value;
-				if (null == line_entry.m_Figure || line_entry.m_Added)
+				if (null == line_entry.m_FigureCacheEntry.m_FigureCacheData.m_FigureBitmapSource || line_entry.m_Added)
 				{
 					continue;
 				}
@@ -1051,8 +1051,7 @@ namespace EmbedFigure
 
 		private void AddFigure(int line_number, LineEntry line_entry, FigureCacheData figure_cache_data)
 		{
-			line_entry.m_Figure = figure_cache_data.m_Figure;
-			if (null == line_entry.m_Figure)
+			if (null == figure_cache_data.m_FigureBitmapSource)
 			{
 				return;
 			}
@@ -1464,7 +1463,7 @@ namespace EmbedFigure
 					if (null == line_entry.m_ErrorMessage)
 					{
 						// The line was correct before. We don't want to display anything if there's an error in the line, so the figure is not valid any more.
-						RemoveFigure(line_number, line_entry);
+						SetCacheEntryForLine(line_number, line_entry, null);
 					}
 				}
 				else
@@ -1482,7 +1481,7 @@ namespace EmbedFigure
 				if (m_LineEntries.TryGetValue(line_number, out LineEntry line_entry))
 				{
 					// But there was a figure or an error message in this line previously. Remove line entry.
-					RemoveFigure(line_number, line_entry);
+					SetCacheEntryForLine(line_number, line_entry, null);
 					m_LineEntries.Remove(line_number);
 				}
 			}
@@ -1509,25 +1508,8 @@ namespace EmbedFigure
 						figure_scale         != line_entry.m_FigureCacheEntry.m_FigureScale)
 					{
 						// The current and the previous figures are different
-						RemoveFigure(line_number, line_entry);
-
 						FigureCacheEntry figure_cache_entry = new FigureCacheEntry(figure_source_string, figure_source_type, figure_scale, inverted);
-
-						if (s_FigureCache.TryGetValue(figure_cache_entry, out FigureCacheEntry stored_figure_cache_entry))
-						{
-							// This figure is already rendered, so just use it.
-							line_entry.m_FigureCacheEntry = stored_figure_cache_entry;
-							FigureCacheData figure_cache_data = stored_figure_cache_entry.m_FigureCacheData;
-							figure_cache_data.AddLineID(line_id);
-							line_entry.m_Figure = figure_cache_data.m_Figure;
-						}
-						else
-						{
-							line_entry.m_FigureCacheEntry = figure_cache_entry;
-							figure_cache_entry.m_FigureCacheData = new FigureCacheData(line_id);
-							s_FigureCache.Add(figure_cache_entry);
-							s_FigureRenderQueue.Add(new FigureRenderQueueEntry(this, figure_cache_entry, color_theme, line_scale));
-						}
+						SetCacheEntryForLine(line_number, line_entry, figure_cache_entry);
 					}
 				}
 				else
@@ -1535,20 +1517,7 @@ namespace EmbedFigure
 					// There's a figure in this line and there was no figure in this line previously
 					FigureCacheEntry figure_cache_entry = new FigureCacheEntry(figure_source_string, figure_source_type, figure_scale, inverted);
 					line_entry = new LineEntry(color_theme, line_scale);
-					if (s_FigureCache.TryGetValue(figure_cache_entry, out FigureCacheEntry stored_figure_cache_entry))
-					{
-						line_entry.m_FigureCacheEntry = stored_figure_cache_entry;
-						FigureCacheData figure_cache_data = stored_figure_cache_entry.m_FigureCacheData;
-						figure_cache_data.AddLineID(line_id);
-						line_entry.m_Figure = figure_cache_data.m_Figure;
-					}
-					else
-					{
-						line_entry.m_FigureCacheEntry = figure_cache_entry;
-						figure_cache_entry.m_FigureCacheData = new FigureCacheData(line_id);
-						s_FigureCache.Add(figure_cache_entry);
-						s_FigureRenderQueue.Add(new FigureRenderQueueEntry(this, figure_cache_entry, color_theme, line_scale));
-					}
+					SetCacheEntryForLine(line_number, line_entry, figure_cache_entry);
 					m_LineEntries.Add(line_number, line_entry);
 				}
 			}
@@ -1568,24 +1537,45 @@ namespace EmbedFigure
 		}
 
 		/// <summary>
-		/// Remove adornment from the UI and unlink cache data from the line entry
+		/// Set cache entry for the specified line.
 		/// </summary>
-		/// <param name="line_number">Line number from where the adornment should be removed</param>
+		/// <param name="line_number">Line number for which the cache entry should be set</param>
 		/// <param name="line_entry">Corresponding line entry</param>
-		private void RemoveFigure(int line_number, LineEntry line_entry)
+		/// <param name="figure_cache_entry">Cache entry to be set</param>
+		private void SetCacheEntryForLine(int line_number, LineEntry line_entry, FigureCacheEntry figure_cache_entry)
 		{
 			RemoveAdornment(line_number, line_entry);
+			LineID line_id = new LineID(this, line_number);
 			if (null != line_entry.m_FigureCacheEntry)
 			{
+				// There was already a cache entry in this line. Remove this line from that cache data.
 				FigureCacheData figure_cache_data = line_entry.m_FigureCacheEntry.m_FigureCacheData;
-				if (figure_cache_data.RemoveLineID(new LineID(this, line_number)))
+				if (figure_cache_data.RemoveLineID(line_id))
 				{
 					s_CacheCanHaveUnreferencedEntries = true;
 				}
-				line_entry.m_FigureCacheEntry = null;
 			}
-			line_entry.m_Figure = null;
-			MVSTE.TextViewExtensions.QueuePostLayoutAction(m_TextView, () => { UpdateLineHeight(line_number); });
+
+			if (null != figure_cache_entry)
+			{
+				// Set up new cache entry for this line
+				if (s_FigureCache.TryGetValue(figure_cache_entry, out FigureCacheEntry stored_figure_cache_entry))
+				{
+					// This figure is already rendered, so just use it.
+					line_entry.m_FigureCacheEntry = stored_figure_cache_entry;
+					FigureCacheData figure_cache_data = stored_figure_cache_entry.m_FigureCacheData;
+					figure_cache_data.AddLineID(line_id);
+				}
+				else
+				{
+					// This figure is not cached. It needs to be rendered.
+					line_entry.m_FigureCacheEntry = figure_cache_entry;
+					figure_cache_entry.m_FigureCacheData = new FigureCacheData(line_id);
+					s_FigureCache.Add(figure_cache_entry);
+					s_FigureRenderQueue.Add(new FigureRenderQueueEntry(this, figure_cache_entry, line_entry.m_ColorTheme, line_entry.m_LineScale));
+				}
+			}
+			MVSTE.TextViewExtensions.QueuePostLayoutAction(m_TextView, () => { UpdateLineHeight(line_id.m_LineNumber); });
 		}
 
 		/// <summary>
@@ -1602,9 +1592,10 @@ namespace EmbedFigure
 			double target_line_height = 0.0;
 			if (m_LineEntries.TryGetValue(line_number, out LineEntry line_entry))
 			{
-				if (null != line_entry.m_Figure)
+				SWMI.BitmapSource figure_bitmap_source = line_entry.m_FigureCacheEntry.m_FigureCacheData.m_FigureBitmapSource;
+				if (null != figure_bitmap_source)
 				{
-					target_line_height = line_entry.m_Figure.m_Height * line_entry.m_LineScale;
+					target_line_height = figure_bitmap_source.Height;
 				}
 			}
 
@@ -1719,22 +1710,7 @@ namespace EmbedFigure
 				                                              inverted);
 
 				int line_number = pair.Key;
-				RemoveFigure(line_number, line_entry);
-
-				if (s_FigureCache.TryGetValue(figure_cache_entry, out FigureCacheEntry stored_figure_cache_entry))
-				{
-					line_entry.m_FigureCacheEntry = stored_figure_cache_entry;
-					FigureCacheData figure_cache_data = stored_figure_cache_entry.m_FigureCacheData;
-					figure_cache_data.AddLineID(new LineID(this, line_number));
-					line_entry.m_Figure = figure_cache_data.m_Figure;
-				}
-				else
-				{
-					line_entry.m_FigureCacheEntry = figure_cache_entry;
-					figure_cache_entry.m_FigureCacheData = new FigureCacheData(new LineID(this, line_number));
-					s_FigureCache.Add(figure_cache_entry);
-					s_FigureRenderQueue.Add(new FigureRenderQueueEntry(this, figure_cache_entry, line_entry.m_ColorTheme, line_entry.m_LineScale));
-				}
+				SetCacheEntryForLine(line_number, line_entry, figure_cache_entry);
 			}
 
 			// We can process s_FigureRenderQueue this early, because background color changes only occasionally.
@@ -1962,7 +1938,7 @@ namespace EmbedFigure
 					}
 					else
 					{
-						RemoveFigure(line_number_shifts[i].m_OldLineNumber, line_number_shifts[i].m_LineEntry);
+						SetCacheEntryForLine(line_number_shifts[i].m_OldLineNumber, line_number_shifts[i].m_LineEntry, null);
 					}
 				}
 
@@ -2012,12 +1988,13 @@ namespace EmbedFigure
 
 			StopTimer();
 
+			// Remove all figures
 			s_FigureRenderQueue.Clear();
 			foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineEntries)
 			{
 				LineEntry line_entry = pair.Value;
 				int line_number = pair.Key;
-				RemoveFigure(line_number, line_entry);
+				SetCacheEntryForLine(line_number, line_entry, null);
 			}
 			m_LineEntries.Clear();
 
@@ -2085,22 +2062,7 @@ namespace EmbedFigure
 				                                              line_entry.m_FigureCacheEntry.m_Inverted);
 
 				int line_number = pair.Key;
-				RemoveFigure(line_number, line_entry);
-
-				if (s_FigureCache.TryGetValue(figure_cache_entry, out FigureCacheEntry stored_figure_cache_entry))
-				{
-					line_entry.m_FigureCacheEntry = stored_figure_cache_entry;
-					FigureCacheData figure_cache_data = stored_figure_cache_entry.m_FigureCacheData;
-					figure_cache_data.AddLineID(new LineID(this, line_number));
-					line_entry.m_Figure = figure_cache_data.m_Figure;
-				}
-				else
-				{
-					figure_cache_entry.m_FigureCacheData = new FigureCacheData(new LineID(this, line_number));
-					s_FigureCache.Add(figure_cache_entry);
-					s_FigureRenderQueue.Add(new FigureRenderQueueEntry(this, figure_cache_entry, line_entry.m_ColorTheme, line_entry.m_LineScale));
-					line_entry.m_FigureCacheEntry = figure_cache_entry;
-				}
+				SetCacheEntryForLine(line_number, line_entry, figure_cache_entry);
 			}
 
 			AddVisibleAdornments(0, int.MaxValue);
@@ -2150,9 +2112,10 @@ namespace EmbedFigure
 			double adornment_height = 0.0;
 			if (m_Manager.m_LineEntries.TryGetValue(line_number, out LineEntry line_entry))
 			{
-				if (null != line_entry.m_Figure)
+				SWMI.BitmapSource figure_bitmap_source = line_entry.m_FigureCacheEntry.m_FigureCacheData.m_FigureBitmapSource;
+				if (null != figure_bitmap_source)
 				{
-					adornment_height = line_entry.m_Figure.m_Height * line_entry.m_LineScale;
+					adornment_height = figure_bitmap_source.Height;
 				}
 			}
 
