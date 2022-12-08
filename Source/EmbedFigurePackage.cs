@@ -358,8 +358,6 @@ namespace EmbedFigure
 #if TRACE_FUNCTIONS
 				Trace.Message("Switched to Main LoadSettingsFromXml");
 #endif
-				bool options_changed = false;
-
 				if (MVS.VSConstants.S_OK == reader.ReadCategoryVersion(out int version_major, out int version_minor, out int version_build, out int version_revision))
 				{
 					if (c_Version_Major == version_major && c_Version_Minor == version_minor && c_Version_Build == version_build && c_Version_Revision == version_revision)
@@ -369,7 +367,6 @@ namespace EmbedFigure
 							if (null != alignment_string && S.Enum.TryParse(alignment_string, out Align alignment))
 							{
 								m_Alignment = alignment;
-								options_changed = true;
 							}
 						}
 
@@ -378,7 +375,6 @@ namespace EmbedFigure
 							if (null != prefix_char && 1 == prefix_char.Length && IsValidPrefixChar(prefix_char[0]) && prefix_char[0] != m_PrefixChar)
 							{
 								m_PrefixChar = prefix_char[0];
-								options_changed = true;
 							}
 						}
 
@@ -387,15 +383,9 @@ namespace EmbedFigure
 							if (update_delay != m_UpdateDelay)
 							{
 								m_UpdateDelay = update_delay;
-								options_changed = true;
 							}
 						}
 					}
-				}
-
-				if (options_changed)
-				{
-					OptionsChanged?.Invoke(this, null);
 				}
 
 #if TRACE_FUNCTIONS
@@ -581,7 +571,10 @@ namespace EmbedFigure
 #endif
 		}
 
-
+		/// <summary>
+		/// Called when the settings should be saved to the registry.
+		/// </summary>
+		/// <remarks>This function is called by the framework on Main Thread</remarks>
 		public override void SaveSettingsToStorage()
 		{
 #if TRACE_FUNCTIONS
@@ -593,6 +586,10 @@ namespace EmbedFigure
 #endif
 		}
 
+		/// <summary>
+		/// Called when the settings should be exported to a vssettings xml file.
+		/// </summary>
+		/// <remarks>This function is called by the framework on Main Thread</remarks>
 		public override void SaveSettingsToXml(MVSSI.IVsSettingsWriter writer)
 		{
 #if TRACE_FUNCTIONS

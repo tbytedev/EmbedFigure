@@ -1049,6 +1049,22 @@ namespace EmbedFigure
 			}
 		}
 
+		private void UpdateAdornmentPositions()
+		{
+			foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineEntries)
+			{
+				LineEntry line_entry = pair.Value;
+				int line_number = pair.Key;
+				if (!line_entry.m_Added)
+				{
+					continue;
+				}
+				m_AdornmentLayer.RemoveAdornmentsByTag(line_number);
+				MVST.ITextSnapshotLine text_snapshot_line = m_TextView.TextSnapshot.GetLineFromLineNumber(line_number);
+				AddAdornment(text_snapshot_line.Extent, line_number, line_entry);
+			}
+		}
+
 		private void AddFigure(int line_number, LineEntry line_entry, FigureCacheData figure_cache_data)
 		{
 			if (null == figure_cache_data.m_FigureBitmapSource)
@@ -1981,42 +1997,44 @@ namespace EmbedFigure
 
 		private void OnOptionsChanged(object sender, S.EventArgs e)
 		{
-			if (s_Options.m_PrevPrefixChar == s_Options.PrefixChar)
+			if (s_Options.m_PrevPrefixChar != s_Options.PrefixChar)
 			{
-				return;
+				StopTimer();
+
+				// Remove all figures
+				s_FigureRenderQueue.Clear();
+				foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineEntries)
+				{
+					LineEntry line_entry = pair.Value;
+					int line_number = pair.Key;
+					SetCacheEntryForLine(line_number, line_entry, null);
+				}
+				m_LineEntries.Clear();
+
+				if (m_TextView.TextViewLines.FormattedSpan.Start == m_TextView.TextViewLines.FormattedSpan.End)
+				{
+					// This file is empty, just return
+					return;
+				}
+
+				int first_visible_line_number = m_TextView.TextSnapshot.GetLineNumberFromPosition(m_TextView.TextViewLines.FormattedSpan.Start);
+				int last_visible_line_number = m_TextView.TextSnapshot.GetLineNumberFromPosition(m_TextView.TextViewLines.FormattedSpan.End - 1);
+				for (int i = first_visible_line_number; i <= last_visible_line_number; ++i)
+				{
+					MVST.ITextSnapshotLine line = m_TextView.TextSnapshot.GetLineFromLineNumber(i);
+					ProcessLine(line.GetText(), i);
+				}
+
+				AddVisibleAdornments(first_visible_line_number, last_visible_line_number);
+
+				if (0 < s_FigureRenderQueue.Count || s_CacheCanHaveUnreferencedEntries)
+				{
+					StartTimer();
+				}
 			}
-
-			StopTimer();
-
-			// Remove all figures
-			s_FigureRenderQueue.Clear();
-			foreach (SCG.KeyValuePair<int, LineEntry> pair in m_LineEntries)
+			else if (s_Options.m_PrevAlignment != s_Options.Alignment)
 			{
-				LineEntry line_entry = pair.Value;
-				int line_number = pair.Key;
-				SetCacheEntryForLine(line_number, line_entry, null);
-			}
-			m_LineEntries.Clear();
-
-			if (m_TextView.TextViewLines.FormattedSpan.Start == m_TextView.TextViewLines.FormattedSpan.End)
-			{
-				// This file is empty, just return
-				return;
-			}
-
-			int first_visible_line_number = m_TextView.TextSnapshot.GetLineNumberFromPosition(m_TextView.TextViewLines.FormattedSpan.Start);
-			int last_visible_line_number = m_TextView.TextSnapshot.GetLineNumberFromPosition(m_TextView.TextViewLines.FormattedSpan.End - 1);
-			for (int i = first_visible_line_number; i <= last_visible_line_number; ++i)
-			{
-				MVST.ITextSnapshotLine line = m_TextView.TextSnapshot.GetLineFromLineNumber(i);
-				ProcessLine(line.GetText(), i);
-			}
-
-			AddVisibleAdornments(first_visible_line_number, last_visible_line_number);
-
-			if (0 < s_FigureRenderQueue.Count || s_CacheCanHaveUnreferencedEntries)
-			{
-				StartTimer();
+				UpdateAdornmentPositions();
 			}
 		}
 
