@@ -940,6 +940,8 @@ namespace EmbedFigure
 			m_TextView.GotAggregateFocus      += OnGotFocus;
 #endif
 			m_TextView.LayoutChanged          += OnLayoutChanged;
+			m_TextView.ViewportLeftChanged    += OnViewportHorizontallyChanged;
+			m_TextView.ViewportWidthChanged   += OnViewportHorizontallyChanged;
 			m_TextView.ZoomLevelChanged       += OnZoomLevelChanged;
 
 			s_Options.OptionsChanged          += OnOptionsChanged;
@@ -981,13 +983,17 @@ namespace EmbedFigure
 					Source = figure_bitmap_source
 				};
 
-				if (Align.Center == s_Options.Alignment)
+				if (Align.Left == s_Options.Alignment)
 				{
-					SWC.Canvas.SetLeft(image, 0.5 * (m_TextView.ViewportWidth - figure_bitmap_source.Width));
+					SWC.Canvas.SetLeft(image, m_TextView.ViewportLeft);
+				}
+				else if (Align.Center == s_Options.Alignment)
+				{
+					SWC.Canvas.SetLeft(image, m_TextView.ViewportLeft + 0.5 * (m_TextView.ViewportWidth - figure_bitmap_source.Width));
 				}
 				else if (Align.Right == s_Options.Alignment)
 				{
-					SWC.Canvas.SetLeft(image, m_TextView.ViewportWidth - figure_bitmap_source.Width);
+					SWC.Canvas.SetLeft(image, m_TextView.ViewportLeft + m_TextView.ViewportWidth - figure_bitmap_source.Width);
 				}
 				else
 				{
@@ -2033,6 +2039,14 @@ namespace EmbedFigure
 				}
 			}
 			else if (s_Options.m_PrevAlignment != s_Options.Alignment)
+			{
+				UpdateAdornmentPositions();
+			}
+		}
+
+		private void OnViewportHorizontallyChanged(object sender, S.EventArgs e)
+		{
+			if (Align.Indentation != s_Options.Alignment)
 			{
 				UpdateAdornmentPositions();
 			}
