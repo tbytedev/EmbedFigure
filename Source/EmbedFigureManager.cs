@@ -206,7 +206,7 @@ namespace EmbedFigure
 		/// Figure data for this line.
 		/// </summary>
 		/// <remarks>
-		/// It's set right after the line is parsed, however the <see cref="Figure"/> reference inside this object can be null until the rendering has been finished.
+		/// It's set right after the line is parsed, however the <see cref="SWMI.BitmapSource"/> reference inside this object can be null until the rendering has been finished.
 		/// It's set to null if there's an error in this line.
 		/// </remarks>
 		internal FigureCacheEntry m_FigureCacheEntry;
@@ -1046,7 +1046,7 @@ namespace EmbedFigure
 				}
 
 				LineEntry line_entry = pair.Value;
-				if (null == line_entry.m_FigureCacheEntry.m_FigureCacheData.m_FigureBitmapSource || line_entry.m_Added)
+				if (null == line_entry.m_FigureCacheEntry || null == line_entry.m_FigureCacheEntry.m_FigureCacheData.m_FigureBitmapSource || line_entry.m_Added)
 				{
 					continue;
 				}
@@ -1475,8 +1475,6 @@ namespace EmbedFigure
 		{
 			string error_message = ParseLine(line_text, out int start_position_index, out string figure_source_string, out FigureSourceType figure_source_type, out ColorTheme color_theme, out double line_scale);
 
-			var line_id = new LineID(this, line_number);
-
 			if (null != error_message)
 			{
 				// The line is erroneous
@@ -1597,6 +1595,11 @@ namespace EmbedFigure
 					s_FigureRenderQueue.Add(new FigureRenderQueueEntry(this, figure_cache_entry, line_entry.m_ColorTheme, line_entry.m_LineScale));
 				}
 			}
+			else
+			{
+				// Clear cache entry for this line
+				line_entry.m_FigureCacheEntry = null;
+			}
 			MVSTE.TextViewExtensions.QueuePostLayoutAction(m_TextView, () => { UpdateLineHeight(line_id.m_LineNumber); });
 		}
 
@@ -1614,10 +1617,14 @@ namespace EmbedFigure
 			double target_line_height = 0.0;
 			if (m_LineEntries.TryGetValue(line_number, out LineEntry line_entry))
 			{
-				SWMI.BitmapSource figure_bitmap_source = line_entry.m_FigureCacheEntry.m_FigureCacheData.m_FigureBitmapSource;
-				if (null != figure_bitmap_source)
+				FigureCacheEntry figure_cache_entry = line_entry.m_FigureCacheEntry;
+				if (null != figure_cache_entry)
 				{
-					target_line_height = figure_bitmap_source.Height;
+					SWMI.BitmapSource figure_bitmap_source = figure_cache_entry.m_FigureCacheData.m_FigureBitmapSource;
+					if (null != figure_bitmap_source)
+					{
+						target_line_height = figure_bitmap_source.Height;
+					}
 				}
 			}
 
@@ -2144,10 +2151,14 @@ namespace EmbedFigure
 			double adornment_height = 0.0;
 			if (m_Manager.m_LineEntries.TryGetValue(line_number, out LineEntry line_entry))
 			{
-				SWMI.BitmapSource figure_bitmap_source = line_entry.m_FigureCacheEntry.m_FigureCacheData.m_FigureBitmapSource;
-				if (null != figure_bitmap_source)
+				FigureCacheEntry figure_cache_entry = line_entry.m_FigureCacheEntry;
+				if (null != figure_cache_entry)
 				{
-					adornment_height = figure_bitmap_source.Height;
+					SWMI.BitmapSource figure_bitmap_source = figure_cache_entry.m_FigureCacheData.m_FigureBitmapSource;
+					if (null != figure_bitmap_source)
+					{
+						adornment_height = figure_bitmap_source.Height;
+					}
 				}
 			}
 
