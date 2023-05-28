@@ -653,8 +653,8 @@ namespace EmbedFigure
 					}
 
 					// Parse TeX file
-					var parser = new WpfMath.TexFormulaParser();
-					WpfMath.TexFormula formula = parser.Parse(tex_file_content);
+					var parser = WpfMath.Parsers.WpfTeXFormulaParser.Instance;
+					XamlMath.TexFormula formula = parser.Parse(tex_file_content);
 
 					MVSS.ThreadHelper.JoinableTaskFactory.Run(async delegate
 					{
@@ -662,8 +662,8 @@ namespace EmbedFigure
 
 						// UI related objects (System.Windows.Media.Imaging.BitmapSource) can be created and used only on Main thread
 						double tex_scale = initial_tex_scale * figure_cache_entry.m_FigureScale;
-						WpfMath.TexRenderer renderer = formula.GetRenderer(WpfMath.TexStyle.Display, tex_scale, tex_font);
-						SWMI.BitmapSource bitmap_source = renderer.RenderToBitmap(0.0, 0.0);
+						XamlMath.TexEnvironment environment = WpfMath.Rendering.WpfTeXEnvironment.Create(XamlMath.TexStyle.Display, tex_scale, tex_font);
+						SWMI.BitmapSource bitmap_source = WpfMath.Rendering.WpfTeXFormulaExtensions.RenderToBitmap(formula, environment, tex_scale);
 
 						bitmap_width = bitmap_source.PixelWidth;
 						bitmap_height = bitmap_source.PixelHeight;

@@ -58,10 +58,10 @@
     </None>
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.VisualStudio.SDK" Version="16.0.206" ExcludeAssets="runtime">
+    <PackageReference Include="Microsoft.VisualStudio.SDK" Version="17.6.36389" ExcludeAssets="runtime">
       <IncludeAssets>compile; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="Microsoft.VSSDK.BuildTools" Version="16.10.1055">
+    <PackageReference Include="Microsoft.VSSDK.BuildTools" Version="17.6.2164">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
@@ -69,7 +69,7 @@
       <Version>3.4.4</Version>
     </PackageReference>
     <PackageReference Include="WpfMath">
-      <Version>0.11.0</Version>
+      <Version>1.1.0</Version>
     </PackageReference>
   </ItemGroup>
   <ItemGroup>
